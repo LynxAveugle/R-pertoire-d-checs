@@ -340,7 +340,7 @@ let boardRotated=false;
 function boardSquares(){const black=userSide(activeGame)==="b";const flip=black!==boardRotated;const files=flip?["h","g","f","e","d","c","b","a"]:["a","b","c","d","e","f","g","h"];const ranks=flip?[1,2,3,4,5,6,7,8]:[8,7,6,5,4,3,2,1];return {files,ranks}}
 function pieceSVG(p){
   const key=`${p[0]}${({p:'P',n:'N',b:'B',r:'R',q:'Q',k:'K'})[p[1]]||p[1].toUpperCase()}`;
-  return `<img class="pieceSvg ${p[0]==="w"?"whitePiece":"blackPiece"}" src="./pieces/${key}.png" alt="" draggable="false" aria-hidden="true">`;
+  return `<img class="pieceSvg ${p[0]==="w"?"whitePiece":"blackPiece"}" src="${new URL(`./pieces/${key}.png`, import.meta.url).href}" alt="" draggable="false" aria-hidden="true">`;
 }
 let boardResizeObserver=null;
 function syncBoardPixelSize(){
@@ -379,7 +379,7 @@ function startEngineSearch(fen){
 function ensureEngine(){
   if(engineReadyPromise)return engineReadyPromise;
   engineReadyPromise=new Promise((resolve,reject)=>{
-    const w=new Worker("./stockfish-worker.js");engineWorker=w;let ready=false,done=false;
+    const w=new Worker(new URL("./stockfish-worker.js", import.meta.url));engineWorker=w;let ready=false,done=false;
     const fail=(err)=>{if(done)return;done=true;engineBusy=false;try{w.terminate()}catch{};engineWorker=null;engineReadyPromise=null;setEngineUnavailable();reject(err)};
     const timer=setTimeout(()=>fail(new Error("Stockfish ne répond pas")),20000);
     w.onmessage=e=>{
@@ -506,7 +506,7 @@ $("pgnFile").addEventListener("change",async e=>{
   }catch(err){toast("Import PGN refusé : "+err.message)}finally{e.target.value=""}
 });
 
-$("exportBtn").addEventListener("click",()=>{
+$("exportBtn")?.addEventListener("click",()=>{
   if(!activeGame?.parsed){toast("Aucune partie ouverte");return}
   try{const out=exportPGN(activeGame.parsed);const blob=new Blob([out],{type:"application/x-chess-pgn"});const url=URL.createObjectURL(blob),a=document.createElement("a");a.href=url;const safeName=v=>String(v||"").replace(/[\\/:*?"<>|]+/g,"_").replace(/\s+/g," ").trim()||"Unknown";a.download=`HighTaxi_${safeName(activeGame.white)}_${safeName(activeGame.black)}.pgn`;a.click();setTimeout(()=>URL.revokeObjectURL(url),500)}catch(e){toast("Export impossible : "+e.message)}
 });

@@ -1,8 +1,8 @@
 /* HighTaxi Chess — Stockfish 18 lite single-thread Web Worker wrapper. */
 const LOCAL_ENGINE_JS="./stockfish/stockfish-18-lite-single.js";
 const LOCAL_ENGINE_WASM="./stockfish/stockfish-18-lite-single.wasm";
-const REMOTE_ENGINE_JS="https://unpkg.com/stockfish@18.0.8/src/stockfish-18-lite-single.js";
-const REMOTE_ENGINE_WASM="https://unpkg.com/stockfish@18.0.8/src/stockfish-18-lite-single.wasm";
+const REMOTE_ENGINE_JS="https://unpkg.com/stockfish@18.0.8/bin/stockfish-18-lite-single.js";
+const REMOTE_ENGINE_WASM="https://unpkg.com/stockfish@18.0.8/bin/stockfish-18-lite-single.wasm";
 let highTaxiToken=0;
 const nativePostMessage=self.postMessage.bind(self);
 function bootEngine(script,wasm,fallback){

@@ -1,4 +1,4 @@
-# HighTaxi Chess PWA — v0.9.11
+# HighTaxi Chess PWA — v0.9.12
 
 PWA personnelle mobile-first pour importer, synchroniser, analyser et annoter les parties de HighTaxi.
 
@@ -43,13 +43,13 @@ node test-phase0.mjs
 - Annotation présentée comme une carte d’analyse.
 - Arbre global conservé mais masqué du flux principal et accessible à la demande.
 
-## v0.9.11 — stabilisation après review
+## v0.9.12 — correctifs runtime après test sur déploiement
 - La synchronisation passe par une Cloudflare Pages Function afin d’identifier correctement le client auprès de Chess.com.
 - Le proxy est limité au compte HighTaxi et aux endpoints d’archives de parties.
 - Repli direct conservé pour les environnements où l’API autorise la requête navigateur.
 - Le cache Service Worker est versionné en v0.9.11 et les routes `/api/` sont exclues du cache.
 
-### Correctifs v0.9.11
+### Correctifs v0.9.12
 - Service Worker : les routes API ne sont plus mises en cache.
 - Proxy Chess.com : validation de chemin insensible à la casse et fallback direct limité aux erreurs réseau/404/405.
 - Meilleur coup UCI → SAN corrigé.
@@ -65,4 +65,11 @@ node test-phase0.mjs
 - Le parseur accepte les notations `12. ...` et `e.p.`.
 
 ### Limitation connue
-Les binaires Stockfish locaux `stockfish-18-lite-single.js` et `.wasm` ne sont pas inclus dans cette archive : le moteur conserve donc son fallback CDN et n’est pas encore garanti hors ligne.
+Les binaires Stockfish locaux `stockfish-18-lite-single.js` et `.wasm` ne sont pas inclus dans cette archive. Le fallback CDN utilise les chemins `/bin/` officiels de Stockfish.js 18.0.8 ; l’analyse fonctionne donc en ligne si le CDN est accessible. Pour une analyse réellement hors ligne, ajoute les deux binaires dans `stockfish/`.
+
+
+### Correctifs v0.9.12
+- Le listener d’export ne bloque plus le chargement de toute l’application lorsque le bouton d’export n’est pas présent dans le DOM. Cela permet notamment au bouton de synchronisation de recevoir son listener.
+- Les chemins des pièces sont résolus par rapport au module afin de rester corrects sous un sous-chemin de déploiement.
+- Le Worker Stockfish utilise lui aussi une URL de module pour son chargement.
+- Le fallback Stockfish CDN pointe vers le répertoire `bin/` réellement publié par Stockfish.js 18.0.8.
