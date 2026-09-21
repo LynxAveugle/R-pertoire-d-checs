@@ -56,29 +56,48 @@ function annotationKind(a){if(["❌","⚠️"].includes(a))return "bad";if(["⭐
 function mergeAnnotationCounts(target,annotations){for(const a of new Set(annotations||[]))target[a]=1}
 function findMoveBySan(fen,san){try{const c=new Chess(fen);for(const m of c.legalMoves())if(c.san(m)===san)return m}catch{}return null}
 
-async function fetchChessComJson(url){
-  const target=new URL(url);
-  const proxyPath=`/api/chesscom?path=${encodeURIComponent(target.pathname+target.search)}`;
-  let proxyStatus=0;
+const CHESSCOM_BASE="https://api.chess.com/pub";
+const CHESSCOM_TIMEOUT_MS=25000;
+
+async function fetchWithTimeout(url,options={}){
+  const controller=new AbortController();
+  const timer=setTimeout(()=>controller.abort(),options.timeout||CHESSCOM_TIMEOUT_MS);
   try{
-    const r=await fetch(proxyPath,{headers:{Accept:"application/json"}});
-    proxyStatus=r.status;
-    if(r.ok)return await r.json();
-    if(r.status!==404&&r.status!==405)throw new Error(`Proxy Chess.com HTTP ${r.status}`);
+    return await fetch(url,{...options,signal:controller.signal,mode:"cors",cache:"no-store"});
   }catch(e){
-    if(proxyStatus!==404&&proxyStatus!==405){
-      if(e instanceof TypeError) { /* network failure: allow direct fallback */ }
-      else throw e;
-    }
-    if(location.protocol!=="http:"&&location.protocol!=="https:")throw new Error("La synchronisation Chess.com nécessite l'application hébergée sur Cloudflare Pages.");
-  }
+    if(e?.name==="AbortError")throw new Error("Délai dépassé");
+    throw e;
+  }finally{clearTimeout(timer)}
+}
+
+async function fetchChessComJson(url){
   try{
-    const r=await fetch(url,{headers:{Accept:"application/json"}});
-    if(!r.ok)throw new Error(`Chess.com HTTP ${r.status}`);
+    const r=await fetchWithTimeout(url,{headers:{Accept:"application/json"}});
+    if(!r.ok)throw new Error(`HTTP ${r.status}`);
     return await r.json();
   }catch(e){
-    throw new Error(`Connexion Chess.com impossible (${e.message}). Vérifie que l'application est bien hébergée sur Cloudflare Pages.`);
+    throw new Error(`Connexion directe à Chess.com impossible (${e.message}). Vérifie la connexion Internet et que l’API publique Chess.com autorise encore les requêtes navigateur.`);
   }
+}
+
+async function fetchChessComPgn(archiveUrl){
+  const url=`${String(archiveUrl).replace(/\/$/,"")}/pgn`;
+  try{
+    const r=await fetchWithTimeout(url,{headers:{Accept:"application/x-chess-pgn,text/plain,*/*"}});
+    if(!r.ok)throw new Error(`HTTP ${r.status}`);
+    return await r.text();
+  }catch(e){
+    throw new Error(`Archive Chess.com inaccessible (${e.message})`);
+  }
+}
+
+function chessComMonthKey(url){
+  const m=String(url).match(/\/games\/(\d{4})\/(\d{2})\/?$/);
+  return m?`${m[1]}/${m[2]}`:String(url);
+}
+function chessComPgnIsStandard(h){
+  const variant=String(h.Variant||h.Rules||"").trim().toLowerCase();
+  return !variant||variant==="standard"||variant==="chess";
 }
 
 function hashId(text){let h=2166136261;for(let i=0;i<text.length;i++){h^=text.charCodeAt(i);h=Math.imul(h,16777619)}return `pgn-${(h>>>0).toString(16)}-${text.length}`}
@@ -145,7 +164,7 @@ function normalizeChessResult(game,h){
   return "*";
 }
 function mainlineSignature(root){const out=[];let n=root;while(n?.children?.[0]){n=n.children[0];out.push(n.san)}return out.join(" ")}
-function gameIdentity(source,parsed,headers){return hashId(`${source}|${headers.White||""}|${headers.Black||""}|${headers.Date||""}|${headers.Result||"*"}|${parsed.startFen||Chess.START_FEN}|${mainlineSignature(parsed.root)}`)}
+function gameIdentity(source,parsed,headers){return hashId(`${source}|${headers.Link||headers.URL||""}|${headers.White||""}|${headers.Black||""}|${headers.Date||""}|${headers.UTCDate||""}|${headers.UTCTime||""}|${headers.Round||""}|${headers.Result||"*"}|${parsed.startFen||Chess.START_FEN}|${mainlineSignature(parsed.root)}`)}
 function metaFromHeaders(h,source,fallback,pgn,extra={}){return {id:hashId(`${source}|${pgn}`),source,timestamp:parseTimestamp(h,fallback),date:h.Date||"",time:h.UTCTime||"",white:h.White||"?",black:h.Black||"?",result:h.Result||"*",eco:openingName(h.ECO||""),time_control:h.TimeControl||"",event:h.Event||"",site:h.Site||"",round:h.Round||"",pgn,analysisTree:null,annotationCount:0,...extra}}
 function serializeTree(root){
   function clean(n){return {move:n.move||null,san:n.san||null,fen:n.fen,annotations:[...(n.annotations||[])],comment:n.comment||"",note:n.note||"",clock:n.clock||null,nags:[...(n.nags||[])],children:(n.children||[]).map(clean)}}
@@ -340,7 +359,14 @@ let boardRotated=false;
 function boardSquares(){const black=userSide(activeGame)==="b";const flip=black!==boardRotated;const files=flip?["h","g","f","e","d","c","b","a"]:["a","b","c","d","e","f","g","h"];const ranks=flip?[1,2,3,4,5,6,7,8]:[8,7,6,5,4,3,2,1];return {files,ranks}}
 function pieceSVG(p){
   const key=`${p[0]}${({p:'P',n:'N',b:'B',r:'R',q:'Q',k:'K'})[p[1]]||p[1].toUpperCase()}`;
-  return `<img class="pieceSvg ${p[0]==="w"?"whitePiece":"blackPiece"}" src="${new URL(`./pieces/${key}.png`, import.meta.url).href}" alt="" draggable="false" aria-hidden="true">`;
+  const src=new URL(`./pieces/${key}.png`,import.meta.url).href;
+  return `<img class="pieceSvg ${p[0]==="w"?"whitePiece":"blackPiece"}" data-piece="${key}" src="${src}" alt="" draggable="false" aria-hidden="true">`;
+}
+const PIECE_FALLBACK={wK:"♔",wQ:"♕",wR:"♖",wB:"♗",wN:"♘",wP:"♙",bK:"♚",bQ:"♛",bR:"♜",bB:"♝",bN:"♞",bP:"♟"};
+function installPieceFallbacks(container){
+  container?.querySelectorAll("img.pieceSvg").forEach(img=>img.addEventListener("error",()=>{
+    const span=document.createElement("span");span.className=`pieceFallback ${img.className}`;span.textContent=PIECE_FALLBACK[img.dataset.piece]||"?";span.setAttribute("aria-hidden","true");img.replaceWith(span);
+  },{once:true}));
 }
 let boardResizeObserver=null;
 function syncBoardPixelSize(){
@@ -427,6 +453,7 @@ function renderBoard(){
     if(col===0){const c=document.createElement("span");c.className="coord rank";c.textContent=rank;d.appendChild(c)}
     board.appendChild(d);
   }
+  installPieceFallbacks(board);
   const st=chess.status();$("position").textContent=st.checkmate?"Échec et mat":st.stalemate?"Pat":`${st.check?"Échec · ":""}Trait aux ${chess.turn==="w"?"Blancs":"Noirs"}`;
   $("boardPlayers").textContent=activeGame?`${activeGame.white||"?"} — ${activeGame.black||"?"} · ${activeGame.result||"*"}`:"Position initiale · HighTaxi Chess";
   renderMoves();renderAnnotations();renderNav();renderAnalysisMeta();try{renderGlobalTree(currentNode.fen)}catch(err){console.warn("Global tree render failed",err)}
@@ -520,68 +547,66 @@ $("syncBtn").addEventListener("click",async()=>{
   b.disabled=true;
   const setProgress=(done,total,text)=>{
     if(wrap)wrap.style.display="block";
-    if(progress)progress.max=total||1;
-    if(progress)progress.value=done;
+    if(progress){progress.max=Math.max(total,1);progress.value=done;}
     if(label)label.textContent=text;
-    b.textContent=done&&total?`Synchronisation ${done}/${total}…`:"Synchronisation…";
+    b.textContent=total?`Synchronisation ${done}/${total}…`:"Synchronisation…";
   };
   try{
-    const {archives=[]}=await fetchChessComJson(`https://api.chess.com/pub/player/${encodeURIComponent(USER)}/games/archives`);
+    const data=await fetchChessComJson(`${CHESSCOM_BASE}/player/${encodeURIComponent(USER)}/games/archives`);
+    const archives=Array.isArray(data?.archives)?data.archives.filter(Boolean):[];
+    if(!archives.length)throw new Error(`Aucune archive trouvée pour ${USER}.`);
     const ordered=[...archives].reverse();
     const synced=new Set(JSON.parse(localStorage.getItem(CHESS_SYNC_KEY)||"[]"));
     const now=new Date();
     const currentKey=`${now.getUTCFullYear()}/${String(now.getUTCMonth()+1).padStart(2,"0")}`;
-    // Only months strictly before the current month may be considered complete.
-    // The current month is always refreshed so games added later are not lost.
     const existingArchiveKeys=new Set(allGames.filter(g=>g.source==="Chess.com"&&g.chessArchive).map(g=>String(g.chessArchive)));
     const pending=ordered.filter(url=>{
-      const m=String(url).match(/games\/(\d{4})\/(\d{2})$/);
-      const key=m?`${m[1]}/${m[2]}`:url;
+      const key=chessComMonthKey(url);
       return key===currentKey||!synced.has(key)||!existingArchiveKeys.has(key);
     });
     const total=pending.length;
-    let processed=0,fetched=0,added=0,skipped=archives.length-pending.length,errors=0;
-    let existing=new Set(allGames.filter(g=>g.source==="Chess.com").map(g=>String(g.id||g.url)));
+    let processed=0,fetched=0,added=0,skipped=archives.length-pending.length,errors=0,invalid=0;
+    const existing=new Set(allGames.filter(g=>g.source==="Chess.com").map(g=>String(g.id||g.url)));
     setProgress(0,total,`0/${total} mois à traiter · ${skipped} déjà synchronisés`);
 
-    for(let batchStart=0;batchStart<pending.length;batchStart+=4){
-      const batch=pending.slice(batchStart,batchStart+4),batchAdds=[];
-      for(const url of batch){
-        let data=null,last=null;
-        for(let attempt=0;attempt<4&&!data;attempt++){
-          try{
-            data=await fetchChessComJson(url);
-          }catch(e){
-            last=e;
-            if(attempt<3)await new Promise(resolve=>setTimeout(resolve,700*(attempt+1)));
-          }
-        }
-        processed++;
-        const monthMatch=String(url).match(/games\/(\d{4})\/(\d{2})$/);
-        const monthKey=monthMatch?`${monthMatch[1]}/${monthMatch[2]}`:url;
-        if(!data){errors++;toast(`Archive ignorée : ${last?.message||"erreur"}`);setProgress(processed,total,`${processed}/${total} mois · ${errors} erreur(s)`);continue}
-        const isCurrentMonth=monthKey===currentKey;
-        if(!isCurrentMonth)synced.add(monthKey);
-        for(const game of data.games||[]){
-          if(game.rules&&String(game.rules).toLowerCase()!=="chess")continue;
-          fetched++;
-          const pgn=game.pgn||"",h=headersFrom(pgn);
-          const id=chessComStableId(game,pgn);
-          if(existing.has(id))continue;
-          const result=normalizeChessResult(game,h);
-          const mergedHeaders={...h,White:game.white?.username||game.white?.name||h.White,Black:game.black?.username||game.black?.name||h.Black,Result:result};
-          const g=metaFromHeaders(mergedHeaders,"Chess.com",Number(game.end_time||0),pgn,{id,url:game.url||"",eco:openingName(game.eco||h.ECO||""),time_control:game.time_control||h.TimeControl||"",chessArchive:monthKey});
-          batchAdds.push(g);existing.add(id);
-        }
-        setProgress(processed,total,`${processed}/${total} mois · ${batchAdds.length} nouvelle(s) dans le lot`);
+    for(const archiveUrl of pending){
+      const monthKey=chessComMonthKey(archiveUrl);
+      let source="",last=null;
+      for(let attempt=0;attempt<3&&!source;attempt++){
+        try{source=await fetchChessComPgn(archiveUrl)}
+        catch(e){last=e;if(attempt<2)await new Promise(r=>setTimeout(r,600*(attempt+1)))}
       }
-      // One IndexedDB transaction per batch, never one transaction per game.
+      processed++;
+      if(!source){errors++;setProgress(processed,total,`${processed}/${total} mois · ${errors} erreur(s)`);continue}
+      const batchAdds=[];
+      for(const raw of splitGames(source)){
+        const h=headersFrom(raw);
+        if(!chessComPgnIsStandard(h))continue;
+        let parsed;
+        try{
+          const result=parsePGN(raw);
+          if(!result.length||result.errors?.length)throw new Error(result.errors?.[0]?.error||"PGN invalide");
+          parsed=result[0];
+        }catch{invalid++;continue}
+        fetched++;
+        const pgn=String(raw).trim();
+        const id=gameIdentity("Chess.com",parsed,h);
+        if(existing.has(id))continue;
+        const result=String(h.Result||"*").trim();
+        const g=metaFromHeaders({...h,Result:["1-0","0-1","1/2-1/2","*"].includes(result)?result:"*"},"Chess.com",parseTimestamp(h,0),pgn,{id,eco:openingName(h.ECO||""),time_control:h.TimeControl||"",chessArchive:monthKey,url:archiveUrl});
+        batchAdds.push(g);existing.add(id);
+      }
       if(batchAdds.length){await putMany(batchAdds);added+=batchAdds.length;allGames.push(...batchAdds)}
+      if(monthKey!==currentKey)synced.add(monthKey);
+      setProgress(processed,total,`${processed}/${total} mois · ${added} nouvelle(s)${errors?` · ${errors} erreur(s)`:""}`);
     }
     localStorage.setItem(CHESS_SYNC_KEY,JSON.stringify([...synced].slice(-120)));
-    allGames=await getAll();invalidateGlobalTree();renderHome();renderGames();renderStats();
-    toast(`${fetched} parties lues · ${added} ajoutée(s) · ${skipped} mois déjà synchronisés${errors?` · ${errors} erreur(s)`:""}`);
-    if(label)label.textContent=`Terminé · ${added} ajoutée(s) · ${skipped} mois ignorés`;
+    allGames=await getAll();invalidateGlobalTree();renderHome();renderGames();renderPgnCollections();renderStats();renderTraining();
+    const details=[`${fetched} parties lues`,`${added} ajoutée(s)`,`${skipped} mois déjà synchronisés`];
+    if(errors)details.push(`${errors} archive(s) en erreur`);
+    if(invalid)details.push(`${invalid} PGN invalide(s)`);
+    toast(details.join(" · "));
+    if(label)label.textContent=`Terminé · ${added} ajoutée(s) · ${errors||invalid?"avec avertissements":"sans erreur"}`;
   }catch(e){
     toast("Erreur de synchronisation : "+e.message);
     if(label)label.textContent="Synchronisation interrompue";
@@ -623,6 +648,7 @@ function renderClubBoard(){
     if(s===selected)d.classList.add("selected");if(legal.has(s))d.classList.add(c.board[s]?"capture":"legal");
     const p=c.board[s];if(p)d.insertAdjacentHTML("beforeend",pieceSVG(p));board.appendChild(d);
   }
+  installPieceFallbacks(board);
   const status=c.status();$("clubStatus").textContent=status.checkmate?"Échec et mat":status.stalemate?"Pat":`${status.check?"Échec · ":""}Trait aux ${c.turn==="w"?"Blancs":"Noirs"}`;
   $("clubPgnPreview").textContent=clubPGN();renderClubMoves();
 }

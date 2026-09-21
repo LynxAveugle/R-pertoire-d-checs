@@ -2,12 +2,14 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 
 const app=fs.readFileSync('./app.js','utf8');
-
-assert.match(app,/async function fetchChessComJson\(/,'La synchronisation doit centraliser les requêtes Chess.com');
-assert.match(app,/fetchChessComJson\([^\n]*archives/,'La liste des archives doit passer par le client API robuste');
-assert.match(app,/\/api\/chesscom\?path=/,'La synchronisation doit passer par le proxy Cloudflare pour fournir un User-Agent accepté par Chess.com');
-const proxy=fs.readFileSync('./functions/api/chesscom.js','utf8');
-assert.match(proxy,/User-Agent/,'Le proxy doit identifier le client auprès de Chess.com');
-assert.match(proxy,/ALLOWED_PREFIX/,'Le proxy doit limiter les chemins accessibles');
-assert.match(app,/Synchronisation impossible|Synchronisation interrompue/,'La synchronisation doit exposer une erreur exploitable');
-console.log('SYNC REGRESSION TESTS OK');
+assert.match(app,/async function fetchChessComJson\(/,'La synchronisation doit centraliser les requêtes JSON Chess.com');
+assert.match(app,/https:\/\/api\.chess\.com\/pub/,'GitHub Pages doit utiliser l’API publique Chess.com directement');
+assert.match(app,/async function fetchChessComPgn\(/,'La synchronisation doit télécharger le PGN mensuel');
+assert.match(app,/\/pgn/,'Les archives mensuelles doivent utiliser leur endpoint PGN');
+assert.match(app,/mode:"cors"/,'Les appels Chess.com doivent expliciter le mode CORS');
+assert.match(app,/cache:"no-store"/,'Les appels Chess.com ne doivent pas servir une archive obsolète');
+assert.match(app,/chessComPgnIsStandard/,'Les variantes non standard doivent rester exclues');
+assert.match(app,/Synchronisation interrompue|Erreur de synchronisation/,'La synchronisation doit exposer une erreur exploitable');
+assert.doesNotMatch(app,/\/api\/chesscom/,'La version GitHub Pages ne doit plus dépendre d’un proxy Cloudflare');
+assert.doesNotMatch(app,/nécessite l'application hébergée sur Cloudflare Pages/i,'Aucune dépendance Cloudflare ne doit rester dans le client');
+console.log('GITHUB PAGES SYNC TESTS OK');

@@ -1,75 +1,98 @@
-# HighTaxi Chess PWA — v0.9.12
+# HighTaxi Chess PWA — v0.9.13 GitHub Pages
 
 PWA personnelle mobile-first pour importer, synchroniser, analyser et annoter les parties de HighTaxi.
 
-## Changements v0.9.6
+## Hébergement cible
 
-- Version de données séparée de la version applicative (`schemaVersion: 2`).
-- Sauvegardes JSON datées avec nombre de parties et validation du schéma.
-- Restauration avec choix remplacement/fusion et confirmation destructive.
-- Recherche et filtres dans la liste des parties : texte, résultat, couleur, source.
-- Entraînement/revue : liste des positions annotées ouvrant directement la position concernée.
-- Statistiques enrichies avec les ouvertures les plus présentes.
-- Service Worker versionné et préparé pour les fichiers Stockfish locaux.
-- Stockfish Worker : tentative locale en priorité, puis repli distant si les binaires locaux ne sont pas présents.
-- IndexedDB : ajout de `clearAll()` pour les restaurations par remplacement.
-- Conservation des tests de régression Chess / PGN / phase 0.
+Cette version est conçue pour **GitHub Pages uniquement** :
 
-## Stockfish offline
+- aucun serveur PHP/Node/Python ;
+- aucune Cloudflare Function ;
+- IndexedDB pour la base locale ;
+- import/export PGN entièrement côté navigateur ;
+- synchronisation Chess.com directement depuis le navigateur ;
+- Service Worker compatible avec le cache GitHub Pages ;
+- chemins d’assets relatifs au module pour fonctionner à la racine ou sous un sous-chemin.
 
-Le worker cherche d'abord :
+GitHub Pages est un hébergement statique ; l’application ne dépend donc d’aucun backend propriétaire.
 
-`stockfish/stockfish-18-lite-single.js`
+## Synchronisation Chess.com
 
-`stockfish/stockfish-18-lite-single.wasm`
+La synchronisation utilise l’API publique Chess.com :
 
-Si ces deux fichiers ne sont pas fournis dans le build, il utilise temporairement la source distante UNPKG. Pour obtenir une analyse réellement hors ligne, ajoute les deux binaires Stockfish 18 lite single-thread dans le dossier `stockfish/` avant déploiement.
+1. récupération de la liste des archives du compte `HighTaxi` ;
+2. téléchargement du PGN mensuel via l’endpoint `/pgn` ;
+3. validation locale du PGN ;
+4. exclusion des variantes non standard ;
+5. déduplication par identité de partie ;
+6. stockage dans IndexedDB.
 
-## Données
+Les endpoints publics d’archives et de parties mensuelles sont documentés et utilisés par Chess.com pour l’accès aux historiques de parties.
 
-Les parties sont stockées dans IndexedDB (`HighTaxiChess`, store `games`). Les sauvegardes sont portables en JSON et contiennent la version du schéma pour permettre les migrations futures.
+La disponibilité exacte des requêtes navigateur dépend des politiques CORS actuellement servies par Chess.com. Le bouton affiche une erreur explicite si l’API refuse la requête.
 
-## Tests
+## Stockfish
+
+Le Worker tente dans cet ordre :
+
+1. fichiers locaux `stockfish/stockfish-18-lite-single.{js,wasm}` s’ils sont ajoutés au dépôt ;
+2. copie GitHub publique de Stockfish.js 18 ;
+3. CDN jsDelivr en second secours.
+
+Le build utilisé est **lite single-thread**, adapté aux navigateurs mobiles et ne nécessitant pas `SharedArrayBuffer`. Le projet de référence utilisé pour le fallback publie bien les fichiers `stockfish-18-lite-single.js` et `.wasm`.
+
+La version livrée fonctionne donc en ligne sans binaire local. Pour une analyse totalement hors ligne, les deux binaires doivent être ajoutés dans `stockfish/`.
+
+## Correctifs v0.9.13
+
+- Suppression complète de la dépendance au proxy `/api/chesscom` et à Cloudflare Pages.
+- Synchronisation Chess.com refondue autour des PGN mensuels, avec retry et timeout.
+- Déduplication plus stable basée sur joueurs, date/heure UTC, résultat, position initiale et ligne principale.
+- Validation des PGN Chess.com avant insertion.
+- Exclusion des variantes non standard.
+- Rafraîchissement de la collection PGN après synchronisation.
+- Cache Service Worker passé en `v0.9.13` et rendu **network-first** pour éviter de rester bloqué sur une ancienne version après un déploiement GitHub Pages.
+- Ajout de `.nojekyll`.
+- Suppression du fichier `_headers` et du dossier `functions/`, inutiles sur GitHub Pages.
+- Correction de robustesse des pièces : chemins relatifs + fallback Unicode si une image PNG est absente ou bloquée.
+- Stockfish : fallback GitHub puis jsDelivr si les binaires locaux ne sont pas présents.
+- Conservation de l’IndexedDB, des sauvegardes/restaurations, de l’arbre d’analyse, des annotations, des variantes et des collections PGN.
+- Version applicative : `0.9.13` ; schéma de données conservé en `2`.
+
+## Installation GitHub Pages
+
+Déposer **le contenu du dossier `htc96`** à la racine du dépôt GitHub, puis activer GitHub Pages sur la branche `main` et le dossier `/ (root)`.
+
+Le dépôt doit notamment contenir :
+
+```text
+index.html
+app.js
+styles.css
+chess.js
+pgn.js
+db.js
+version.js
+sw.js
+stockfish-worker.js
+manifest.webmanifest
+.nojekyll
+pieces/
+```
+
+## Tests locaux
 
 ```bash
+node test-smoke.mjs
 node test-chess.mjs
 node test-pgn.mjs
 node test-phase0.mjs
+node test-critical.mjs
+node test-import-regression.mjs
+node test-review-fixes.mjs
+node test-sync-regression.mjs
+node test-github-pages.mjs
+node test-analysis-ui.mjs
 ```
 
-## v0.9.9 — refonte ergonomique de l’écran Analyse
-- Interface Analyse restructurée selon la maquette fournie : header dédié, échiquier dominant, panneaux Coups joués / Stockfish / Meilleurs coups.
-- Contrôles tactiles sous l’échiquier, dont rotation manuelle.
-- Annotation présentée comme une carte d’analyse.
-- Arbre global conservé mais masqué du flux principal et accessible à la demande.
-
-## v0.9.12 — correctifs runtime après test sur déploiement
-- La synchronisation passe par une Cloudflare Pages Function afin d’identifier correctement le client auprès de Chess.com.
-- Le proxy est limité au compte HighTaxi et aux endpoints d’archives de parties.
-- Repli direct conservé pour les environnements où l’API autorise la requête navigateur.
-- Le cache Service Worker est versionné en v0.9.11 et les routes `/api/` sont exclues du cache.
-
-### Correctifs v0.9.12
-- Service Worker : les routes API ne sont plus mises en cache.
-- Proxy Chess.com : validation de chemin insensible à la casse et fallback direct limité aux erreurs réseau/404/405.
-- Meilleur coup UCI → SAN corrigé.
-- Import PGN validé avant écriture et identifiant basé sur la partie, pas sur le texte brut.
-- Export PGN des collections optimisé : les parties sans analyse réutilisent leur PGN original.
-- Autosauvegarde par snapshot + flush lors des changements de partie, masquage de page et navigation.
-- Annotations globales dédupliquées par arête.
-- Arêtes de l’arbre basées sur from/to/promotion.
-- Variantes signalées visuellement dans la liste des coups.
-- En passant normalisé dans la clé de position.
-- Variantes Chess.com non standard ignorées.
-- État des mois synchronisés inclus dans les sauvegardes et resynchronisation possible après suppression des parties d’un mois.
-- Le parseur accepte les notations `12. ...` et `e.p.`.
-
-### Limitation connue
-Les binaires Stockfish locaux `stockfish-18-lite-single.js` et `.wasm` ne sont pas inclus dans cette archive. Le fallback CDN utilise les chemins `/bin/` officiels de Stockfish.js 18.0.8 ; l’analyse fonctionne donc en ligne si le CDN est accessible. Pour une analyse réellement hors ligne, ajoute les deux binaires dans `stockfish/`.
-
-
-### Correctifs v0.9.12
-- Le listener d’export ne bloque plus le chargement de toute l’application lorsque le bouton d’export n’est pas présent dans le DOM. Cela permet notamment au bouton de synchronisation de recevoir son listener.
-- Les chemins des pièces sont résolus par rapport au module afin de rester corrects sous un sous-chemin de déploiement.
-- Le Worker Stockfish utilise lui aussi une URL de module pour son chargement.
-- Le fallback Stockfish CDN pointe vers le répertoire `bin/` réellement publié par Stockfish.js 18.0.8.
+Le fichier `test-import-regression.mjs` utilise également le PGN Chess.com fourni avec le projet lorsqu’il est disponible à `/mnt/data/ChessCom_hightaxi_202609.pgn`.
