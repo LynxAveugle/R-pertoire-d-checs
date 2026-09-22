@@ -1,4 +1,4 @@
-# HighTaxi Chess PWA — v0.9.16 GitHub Pages
+# HighTaxi Chess PWA — v0.9.17 GitHub Pages
 
 PWA personnelle mobile-first pour importer, synchroniser, analyser et annoter les parties de HighTaxi.
 
@@ -43,7 +43,7 @@ Le build utilisé est **lite single-thread**, adapté aux navigateurs mobiles et
 
 La version livrée fonctionne donc en ligne sans binaire local. Pour une analyse totalement hors ligne, les deux binaires doivent être ajoutés dans `stockfish/`.
 
-## Correctifs v0.9.16
+## Correctifs v0.9.17
 
 - Suppression complète de la dépendance au proxy `/api/chesscom` et à Cloudflare Pages.
 - Synchronisation Chess.com refondue autour des PGN mensuels, avec retry et timeout.
@@ -51,17 +51,17 @@ La version livrée fonctionne donc en ligne sans binaire local. Pour une analyse
 - Validation des PGN Chess.com avant insertion.
 - Exclusion des variantes non standard.
 - Rafraîchissement de la collection PGN après synchronisation.
-- Cache Service Worker passé en `v0.9.16` et rendu **network-first** pour éviter de rester bloqué sur une ancienne version après un déploiement GitHub Pages.
+- Cache Service Worker passé en `v0.9.17` et rendu **network-first** pour éviter de rester bloqué sur une ancienne version après un déploiement GitHub Pages.
 - Ajout de `.nojekyll`.
 - Suppression du fichier `_headers` et du dossier `functions/`, inutiles sur GitHub Pages.
 - Correction de robustesse des pièces : chemins relatifs + fallback Unicode si une image PNG est absente ou bloquée.
 - Stockfish : fallback GitHub puis jsDelivr si les binaires locaux ne sont pas présents.
 - Conservation de l’IndexedDB, des sauvegardes/restaurations, de l’arbre d’analyse, des annotations, des variantes et des collections PGN.
-- Version applicative : `0.9.13` ; schéma de données conservé en `2`.
+- Version applicative : `0.9.17` ; schéma de données conservé en `2`.
 
 ## Installation GitHub Pages
 
-Déposer **le contenu du dossier `htc96`** à la racine du dépôt GitHub, puis activer GitHub Pages sur la branche `main` et le dossier `/ (root)`.
+Déposer **le contenu du dossier du projet** à la racine du dépôt GitHub, puis activer GitHub Pages sur la branche `main` et le dossier `/ (root)`.
 
 Le dépôt doit notamment contenir :
 
@@ -98,7 +98,11 @@ node test-analysis-ui.mjs
 Le fichier `test-import-regression.mjs` utilise également le PGN Chess.com fourni avec le projet lorsqu’il est disponible à `/mnt/data/ChessCom_hightaxi_202609.pgn`.
 
 
-## v0.9.16
+## v0.9.17
+- Nouvelles annotations visuelles en pastilles pastel selon la palette Source.
+- Onglets d’analyse `Toutes / HighTaxi Blancs / HighTaxi Noirs` pour filtrer l’arbre et les jauges.
+- Prochains coups visibles directement sous l’analyse, avec statistiques Blancs / nulles / Noirs.
+- Flèches des coups de la base : coups joués par HighTaxi mis en évidence.
 - Annotations de qualité : !!, !, ★, 👍, ✓, 📖, ?!, ?, ❌, ??.
 - Export PGN depuis Analyse.
 - Panneau Réglages réel.

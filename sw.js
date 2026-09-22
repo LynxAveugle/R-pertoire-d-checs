@@ -1,4 +1,4 @@
-const CACHE="hightaxi-chess-cache-v0.9.16";
+const CACHE="hightaxi-chess-cache-v0.9.17";
 const STATIC=["./","./index.html","./styles.css","./app.js","./chess.js","./pgn.js","./db.js","./version.js","./stockfish-worker.js","./manifest.webmanifest","./logo.jpg","./apple-touch-icon.png","./icon-192.png","./icon-512.png","./maskable-192.png","./maskable-512.png","./pieces/wP.png","./pieces/wN.png","./pieces/wB.png","./pieces/wR.png","./pieces/wQ.png","./pieces/wK.png","./pieces/bP.png","./pieces/bN.png","./pieces/bB.png","./pieces/bR.png","./pieces/bQ.png","./pieces/bK.png","./piece-assets.js"];
 self.addEventListener("install",e=>e.waitUntil(caches.open(CACHE).then(async cache=>{for(const url of STATIC){try{await cache.add(url)}catch{}}}).then(()=>self.skipWaiting())));
 self.addEventListener("activate",e=>e.waitUntil(caches.keys().then(keys=>Promise.all(keys.filter(k=>k.startsWith("hightaxi-chess-")&&k!==CACHE).map(k=>caches.delete(k)))).then(()=>self.clients.claim())));

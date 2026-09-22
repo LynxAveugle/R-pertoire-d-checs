@@ -20,7 +20,7 @@ const ANNOTATION_DEFS=[
 const CHESS_DRAW_RESULTS=new Set(["agreed","stalemate","repetition","insufficient","timevsinsufficient","50move","50_moves","draw"]);
 const CHESS_SYNC_KEY="ht_chess_sync_archives_v3";
 let allGames=[],activeGame=null,currentNode=null,chess=new Chess(),selectedSquare=null,lastMove=null;
-let globalTree=null,globalTreeBuilding=false,globalTreeBuiltFor=0,globalTreeProgress={done:0,total:0};
+let globalTree=null,globalTreeBuilding=false,globalTreeBuiltFor=0,globalTreeProgress={done:0,total:0},globalTreeSideFilter="all",globalTreePendingFilter=null;
 let dataRevision=0,trainingCacheRevision=-1,trainingCache=[];
 let pgnRenderToken=0;
 let persistTimer=null,engineWorker=null,engineReadyPromise=null,engineSearchToken=0,engineLastFen="",enginePendingFen=null,engineBusy=false,engineUnavailable=false,clubState=null;
@@ -232,9 +232,10 @@ function positionKeyFromFen(fen){
 }
 async function buildGlobalTree(){
   if(globalTreeBuilding)return;
-  if(globalTree&&globalTreeBuiltFor===dataRevision)return;
+  const filterKey=globalTreeSideFilter;
+  if(globalTree&&globalTreeBuiltFor===dataRevision&&globalTree._filter===filterKey)return;
   globalTreeBuilding=true;
-  const games=safeGames().filter(g=>g.pgn);
+  const games=safeGames().filter(g=>g.pgn&&(!globalTreeSideFilter||globalTreeSideFilter==="all"||userSide(g)===globalTreeSideFilter));
   globalTreeProgress={done:0,total:games.length};
   renderGlobalTree(currentNode?.fen||Chess.START_FEN);
   const nodes=new Map();
@@ -290,19 +291,20 @@ async function buildGlobalTree(){
         }
       }
       globalTreeProgress.done=end;
-      globalTree={nodes};
+      globalTree={nodes,_filter:filterKey};
       renderGlobalTree(currentNode?.fen||Chess.START_FEN);
       renderMoves();
       await new Promise(r=>setTimeout(r,0));
     }
     saveGlobalMoveAnnotations();
-    globalTree={nodes};
+    globalTree={nodes,_filter:filterKey};
     globalTreeBuiltFor=dataRevision;
     renderMoves();
   }finally{
     globalTreeBuilding=false;
     renderGlobalTree(currentNode?.fen||Chess.START_FEN);
     renderMoves();
+    if(globalTreePendingFilter!==null && globalTreePendingFilter!==globalTree?._filter){const next=globalTreePendingFilter;globalTreePendingFilter=null;globalTreeSideFilter=next;globalTree=null;globalTreeBuiltFor=0;setTimeout(()=>buildGlobalTree(),0);}
   }
 }
 function gaugeMarkup(stats,total){
@@ -327,7 +329,7 @@ function renderGlobalArrows(fen){
   const center=s=>{const f=s[0],r=Number(s[1]),col=files.indexOf(f),row=ranks.indexOf(r);return {x:(col+.5)*100,y:(row+.5)*100}};
   for(const e of edges){const m=e.move||findMoveBySan(fen,e.san);if(!m)continue;const a=center(m.from),b=center(m.to);const dx=b.x-a.x,dy=b.y-a.y,len=Math.hypot(dx,dy)||1;const nx=-dy/len*3.2,ny=dx/len*3.2;const offset=(seen.length-(edges.length-1)/2)*2.4;const x1=a.x+nx*offset,y1=a.y+ny*offset,x2=b.x+nx*offset,y2=b.y+ny*offset;seen.push(e);
     const g=document.createElementNS("http://www.w3.org/2000/svg","g");g.classList.add(...["moveArrow",e.playedByUser?"mine":"opponent",e.bad?"hasBad":"",e.good?"hasGood":""].filter(Boolean));
-    const line=document.createElementNS("http://www.w3.org/2000/svg","line");line.setAttribute("x1",x1);line.setAttribute("y1",y1);line.setAttribute("x2",x2);line.setAttribute("y2",y2);line.setAttribute("marker-end","url(#htArrow)");line.setAttribute("stroke-width",e.count>1?7:5);line.setAttribute("stroke-linecap","round");line.setAttribute("vector-effect","non-scaling-stroke");g.appendChild(line);
+    const line=document.createElementNS("http://www.w3.org/2000/svg","line");line.setAttribute("x1",x1);line.setAttribute("y1",y1);line.setAttribute("x2",x2);line.setAttribute("y2",y2);line.setAttribute("marker-end","url(#htArrow)");line.setAttribute("stroke","currentColor");line.setAttribute("stroke-width",e.playedByUser?7:5);line.setAttribute("stroke-linecap","round");line.setAttribute("vector-effect","non-scaling-stroke");g.appendChild(line);
     const label=document.createElementNS("http://www.w3.org/2000/svg","text");label.setAttribute("x",(x1+x2)/2+4);label.setAttribute("y",(y1+y2)/2-4);label.setAttribute("text-anchor","middle");label.textContent=e.playedByUser?`${e.san} · ${e.count}`:`${e.san} · ${e.count}`;g.appendChild(label);
     svg.appendChild(g);
   }
@@ -341,7 +343,9 @@ function renderGlobalTree(fen){
   if(!node){box.innerHTML='<div class="muted">Position absente de l’arbre global.</div>';return}
   const edges=[...node.children.values()].sort((a,b)=>b.count-a.count);
   if(!edges.length){box.innerHTML=`<div class="treeTitle">Aucun coup enregistré depuis cette position.</div>`;return}
-  box.innerHTML=`<div class="treeTitle">${node.count.toLocaleString("fr-FR")} partie(s) · ${edges.length} coup(s) joué(s) depuis cette position</div><div class="treeBranches">${edges.map(e=>{const anns=Object.entries(e.annotations||{}).sort((a,b)=>b[1]-a[1]).slice(0,4).map(([a,n])=>`${a}${n>1?`×${n}`:""}`).join(" ");return `<button class="treeBranch" data-fen="${esc(e.node.fen)}" data-game="${esc(e.sampleGameId||"")}"><div class="treeMoveBlock"><span class="treeMove">${esc(e.san)}</span><span class="treeCount">${e.count.toLocaleString("fr-FR")} partie(s)</span>${e.playedByUser?`<span class="treeMine">${e.playedByUser}× par toi</span>`:""}</div>${gaugeMarkup(e.stats,e.count)}<div class="treeAnnotations">${anns||"—"}</div></button>`}).join("")}</div>`;
+  const filterLabel=globalTreeSideFilter==="w"?"tes parties avec les Blancs":globalTreeSideFilter==="b"?"tes parties avec les Noirs":"toutes tes parties";
+  box.innerHTML=`<div class="analysisScopeTabs" role="tablist"><button class="analysisScopeTab ${globalTreeSideFilter==="all"?"active":""}" data-side="all">Toutes</button><button class="analysisScopeTab ${globalTreeSideFilter==="w"?"active":""}" data-side="w">HighTaxi Blancs</button><button class="analysisScopeTab ${globalTreeSideFilter==="b"?"active":""}" data-side="b">HighTaxi Noirs</button></div><div class="treeTitle">${node.count.toLocaleString("fr-FR")} partie(s) · ${edges.length} prochain(s) coup(s) · ${filterLabel}</div><div class="treeBranches">${edges.map(e=>{const anns=Object.entries(e.annotations||{}).sort((a,b)=>b[1]-a[1]).slice(0,4).map(([a,n])=>`${a}${n>1?`×${n}`:""}`).join(" ");return `<button class="treeBranch" data-fen="${esc(e.node.fen)}" data-game="${esc(e.sampleGameId||"")}"><div class="treeMoveBlock"><span class="treeMove">${esc(e.san)}</span><span class="treeCount">${e.count.toLocaleString("fr-FR")} partie(s)</span>${e.playedByUser?`<span class="treeMine">${e.playedByUser}× par toi</span>`:""}</div>${gaugeMarkup(e.stats,e.count)}<div class="treeAnnotations">${anns||"—"}</div></button>`}).join("")}</div>`;
+  box.querySelectorAll(".analysisScopeTab").forEach(b=>b.addEventListener("click",()=>{const next=b.dataset.side||"all";if(next===globalTreeSideFilter)return;globalTreeSideFilter=next;globalTree=null;globalTreeBuiltFor=0;if(globalTreeBuilding){globalTreePendingFilter=next;}else{buildGlobalTree();}}));
   box.querySelectorAll(".treeBranch").forEach(b=>b.addEventListener("click",async()=>{renderGlobalTree(b.dataset.fen);if(b.dataset.game){await openGame(b.dataset.game);gotoPositionKey(positionKeyFromFen(b.dataset.fen));}}));
   try{renderGlobalArrows(fen)}catch(err){console.warn("Global arrows disabled for this render",err)}
 }
@@ -398,7 +402,7 @@ async function openGame(id){
     const tree=g.analysisTree?restoreTree(g.analysisTree):parsed.root;
     // Keep the parsed headers/result while replacing only the analysis tree.
     parsed.root=tree; if(g.analysisTree)parsed.startFen=tree.fen;
-    activeGame={...g,parsed};currentNode=tree;chess=new Chess(tree.fen);selectedSquare=null;lastMove=null;boardRotated=false;nav("boardScreen");
+    activeGame={...g,parsed};currentNode=tree;chess=new Chess(tree.fen);selectedSquare=null;lastMove=null;boardRotated=false;globalTreeSideFilter=userSide(g)||"all";globalTree=null;globalTreeBuiltFor=0;nav("boardScreen");
   }catch(e){toast("Impossible de charger la partie : "+e.message)}
 }
 let boardRotated=false;
@@ -451,7 +455,14 @@ function startEngineSearch(fen){
 function ensureEngine(){
   if(engineReadyPromise)return engineReadyPromise;
   engineReadyPromise=new Promise((resolve,reject)=>{
-    const w=new Worker(new URL("./stockfish-worker.js", import.meta.url));engineWorker=w;let ready=false,done=false;
+    const workerCandidates=[
+      {js:new URL("./stockfish/stockfish-18-lite-single.js",import.meta.url).href,wasm:new URL("./stockfish/stockfish-18-lite-single.wasm",import.meta.url).href,label:"local"},
+      {js:"https://raw.githubusercontent.com/solid-apps/stockfish/gh-pages/vendor/stockfish-18-lite-single.js",wasm:"https://raw.githubusercontent.com/solid-apps/stockfish/gh-pages/vendor/stockfish-18-lite-single.wasm",label:"GitHub"},
+      {js:"https://cdn.jsdelivr.net/npm/stockfish@18.0.8/bin/stockfish-18-lite-single.js",wasm:"https://cdn.jsdelivr.net/npm/stockfish@18.0.8/bin/stockfish-18-lite-single.wasm",label:"jsDelivr"}
+    ];
+    let candidateIndex=0;
+    const makeWorker=()=>{const c=workerCandidates[candidateIndex];const base=new URL("./stockfish-worker.js",import.meta.url);base.search=`?engine=${encodeURIComponent(c.js)}`;base.hash=`${encodeURIComponent(c.wasm)},worker`;return new Worker(base);};
+    const w=makeWorker();engineWorker=w;let ready=false,done=false;
     const fail=(err)=>{if(done)return;done=true;engineBusy=false;try{w.terminate()}catch{};engineWorker=null;engineReadyPromise=null;setEngineUnavailable();reject(err)};
     const timer=setTimeout(()=>fail(new Error("Stockfish ne répond pas")),20000);
     w.onmessage=e=>{
@@ -461,7 +472,7 @@ function ensureEngine(){
       if(line.startsWith("bestmove")){engineBusy=false;const next=enginePendingFen;enginePendingFen=null;if(next)startEngineSearch(next)}
       handleEngineLine(line,token);
     };
-    w.onerror=()=>fail(new Error("Moteur indisponible"));
+    w.onerror=()=>{if(candidateIndex<workerCandidates.length-1){candidateIndex++;try{w.terminate()}catch{};engineWorker=null;engineReadyPromise=null;setTimeout(()=>{ensureEngine().then(()=>{if(enginePendingFen&&!engineBusy)startEngineSearch(enginePendingFen)}).catch(()=>{})},0);return}fail(new Error("Moteur indisponible"));};
     try{w.postMessage("uci")}catch(e){fail(e)}
   }).catch(e=>{setEngineUnavailable();throw e});
   return engineReadyPromise;
@@ -490,7 +501,7 @@ function renderBoard(){
     const p=chess.board[s];if(p)d.insertAdjacentHTML("beforeend",pieceSVG(p));
     const nodeAnno=currentNode?.annotations||[];
     if(nodeAnno.length && currentNode?.move && currentNode.move.to===s){
-      const badge=document.createElement("span");badge.className="squareAnnotation";badge.textContent=nodeAnno[nodeAnno.length-1];badge.title=nodeAnno.join(" ");d.appendChild(badge);
+      const badge=document.createElement("span");const lastDef=annotationDef(nodeAnno[nodeAnno.length-1]);badge.className=`squareAnnotation ${lastDef.kind}`;badge.dataset.annotation=lastDef.icon;badge.textContent=lastDef.icon;badge.title=nodeAnno.join(" ");d.appendChild(badge);
     }
     if(currentNode?.note?.trim() && currentNode?.move?.to===s){
       const note=document.createElement("span");note.className="squareNote";note.textContent="✎";note.title=currentNode.note.trim();d.appendChild(note);
@@ -558,7 +569,7 @@ function saveNoteBeforeNavigation(){clearTimeout(noteSaveTimer);saveNoteDraft();
 
 function renderAnnotations(){
   const row=$("annotationRow");if(!row)return;row.innerHTML="";const set=new Set(currentNode?.annotations||[]);
-  ANNOTATION_DEFS.forEach(def=>{const b=document.createElement("button");b.type="button";b.className=`anno ${def.kind} ${set.has(def.icon)?"active":""}`;b.textContent=def.icon;b.title=`${def.icon} · ${def.label}`;b.setAttribute("aria-label",def.label);b.addEventListener("click",()=>{
+  ANNOTATION_DEFS.forEach(def=>{const b=document.createElement("button");b.type="button";b.className=`anno ${def.kind} ${set.has(def.icon)?"active":""}`;b.dataset.annotation=def.icon;b.dataset.label=def.label;b.textContent=def.icon;b.title=`${def.icon} · ${def.label}`;b.setAttribute("aria-label",def.label);b.addEventListener("click",()=>{
     currentNode.annotations=currentNode.annotations||[];
     currentNode.annotations=currentNode.annotations.includes(def.icon)?currentNode.annotations.filter(x=>x!==def.icon):[...currentNode.annotations,def.icon];
     if(currentNode.parent&&currentNode.san){const key=globalMoveKey(currentNode.parent.fen,currentNode.move);const next=[...currentNode.annotations];const counts={good:0,bad:0,neutral:0};next.forEach(x=>counts[annotationKind(x)]++);globalMoveAnnotations[key]={annotations:next,kindCounts:counts};saveGlobalMoveAnnotations();}
