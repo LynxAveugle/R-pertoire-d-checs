@@ -74,8 +74,8 @@ function sanCore(s){return s.replace(/[+#]+$/g,"").replace(/[!?]+$/g,"")}
 function parseAnnotationComment(text){
   const m=String(text||"").match(/HighTaxi\s*:\s*(.*)/i); if(!m)return null;
   const body=m[1].trim();
-  const annotations=[...body.matchAll(/⭐|❌|⚠️|💡|🎯|🧠|⏱️|👀|🔥/g)].map(x=>x[0]);
-  const note=body.replace(/⭐|❌|⚠️|💡|🎯|🧠|⏱️|👀|🔥/g,"").trim();
+  const annotations=[...body.matchAll(/!!|\?!|\?\?|❌|★|👍|✓|📖|\?|!|⭐|⚠️|💡|🎯|🧠|⏱️|👀|🔥/g)].map(x=>x[0]);
+  const note=body.replace(/!!|\?!|\?\?|❌|★|👍|✓|📖|\?|!|⭐|⚠️|💡|🎯|🧠|⏱️|👀|🔥/g,"").trim();
   return {annotations,note};
 }
 

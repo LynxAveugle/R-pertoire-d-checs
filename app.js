@@ -1,27 +1,46 @@
 import {Chess} from "./chess.js";
 import {APP_VERSION,DATA_SCHEMA_VERSION} from "./version.js";
+import {PIECE_DATA} from "./piece-assets.js";
 import {parsePGN,exportPGN,headersFrom,splitGames,openingLineUltraFast} from "./pgn.js";
 import {getAll,put,putMany,remove,clearAll,replaceAll,migrateLegacy,requestPersistence,estimateStorage} from "./db.js";
 
-const USER="HighTaxi",ANNOS=["⭐","❌","⚠️","💡","🎯","🧠","⏱️","👀","🔥"];
+const USER="HighTaxi";
+const ANNOTATION_DEFS=[
+  {icon:"!!",label:"Excellent / décisif",kind:"good",nag:3},
+  {icon:"!",label:"Bon coup",kind:"good",nag:1},
+  {icon:"★",label:"Coup brillant",kind:"good",nag:3},
+  {icon:"👍",label:"Bon coup",kind:"good",nag:1},
+  {icon:"✓",label:"Coup correct",kind:"good",nag:null},
+  {icon:"📖",label:"Coup théorique",kind:"neutral",nag:null},
+  {icon:"?!",label:"Coup douteux",kind:"bad",nag:6},
+  {icon:"?",label:"Erreur",kind:"bad",nag:2},
+  {icon:"❌",label:"Mauvais coup",kind:"bad",nag:2},
+  {icon:"??",label:"Grosse erreur",kind:"bad",nag:4}
+];
 const CHESS_DRAW_RESULTS=new Set(["agreed","stalemate","repetition","insufficient","timevsinsufficient","50move","50_moves","draw"]);
 const CHESS_SYNC_KEY="ht_chess_sync_archives_v3";
 let allGames=[],activeGame=null,currentNode=null,chess=new Chess(),selectedSquare=null,lastMove=null;
 let globalTree=null,globalTreeBuilding=false,globalTreeBuiltFor=0,globalTreeProgress={done:0,total:0};
+let dataRevision=0,trainingCacheRevision=-1,trainingCache=[];
+let pgnRenderToken=0;
 let persistTimer=null,engineWorker=null,engineReadyPromise=null,engineSearchToken=0,engineLastFen="",enginePendingFen=null,engineBusy=false,engineUnavailable=false,clubState=null;
 let gameSearch="",gameSearchTimer=null,gameResultFilter="all",gameColorFilter="all",gameSourceFilter="all";
 let globalMoveAnnotations=loadGlobalMoveAnnotations();
+let appSettings={autoEngine:true,showArrows:true,compactMoves:false};
+try{appSettings={...appSettings,...JSON.parse(localStorage.getItem("ht_settings_v2")||"{}")}}catch{}
+function saveAppSettings(){try{localStorage.setItem("ht_settings_v2",JSON.stringify(appSettings))}catch{}}
+
 const $=id=>document.getElementById(id);
 function toast(t){const x=$("toast");x.textContent=t;x.style.display="block";clearTimeout(window._toast);window._toast=setTimeout(()=>x.style.display="none",3200)}
 function nav(id){
-  if(id!=="boardScreen"&&document.body.classList.contains("analysisActive"))void flushPendingPersist();
+  if(id!=="boardScreen"&&document.body.classList.contains("analysisActive"))scheduleBackgroundPersist();
   document.querySelectorAll(".screen").forEach(s=>s.classList.remove("active"));
   $(id).classList.add("active");
   document.body.classList.toggle("analysisActive",id==="boardScreen");
   document.querySelectorAll(".tab").forEach(b=>b.classList.toggle("active",b.dataset.screen===id));
   if(id==="home")renderHome();
   if(id==="games"){renderGames();renderPgnCollections();}
-  if(id==="boardScreen"){renderBoard();if(!globalTree)buildGlobalTree();onPositionChanged();}
+  if(id==="boardScreen"){renderBoard();if(!globalTree&&!globalTreeBuilding)setTimeout(()=>buildGlobalTree(),0);onPositionChanged();}
   if(id==="stats")renderStats();
   if(id==="training")renderTraining();
 }
@@ -33,12 +52,23 @@ $("gameSourceFilter")?.addEventListener("change",e=>{gameSourceFilter=e.target.v
 
 let pgnColor="w";
 function gamesForPgnColor(){return sorted().filter(g=>userSide(g)===pgnColor);}
-function recreatedPgn(g){try{const parsed=parsePGN(g.pgn||"")[0];if(!parsed)return "";if(g.analysisTree){parsed.root=restoreTree(g.analysisTree);parsed.startFen=parsed.root.fen;}return exportPGN(parsed);}catch{return "";}}
+const recreatedPgnCache=new Map();
+function recreatedPgn(g){
+  const cacheKey=`${g.id}|${g.updatedAt||0}|${g.analysisTree?JSON.stringify(g.analysisTree).length:0}`;
+  const cached=recreatedPgnCache.get(String(g.id));
+  if(cached?.key===cacheKey)return cached.value;
+  try{const parsed=parsePGN(g.pgn||"")[0];if(!parsed)return "";if(g.analysisTree){parsed.root=restoreTree(g.analysisTree);parsed.startFen=parsed.root.fen;}const value=exportPGN(parsed);recreatedPgnCache.set(String(g.id),{key:cacheKey,value});return value}catch{return ""}
+}
 function renderPgnCollections(){
-  const games=gamesForPgnColor(),original=games.map(g=>String(g.pgn||"").trim()).filter(Boolean).join("\n\n"),recreated=games.map(recreatedPgn).filter(Boolean).join("\n\n");
-  const title=$("pgnPanelTitle");if(title)title.textContent=pgnColor==="w"?"HighTaxi avec les Blancs":"HighTaxi avec les Noirs";
-  const a=$("originalPgnCollection"),b=$("recreatedPgnCollection");if(a)a.value=original;if(b)b.value=recreated;
+  const token=++pgnRenderToken,games=gamesForPgnColor(),title=$("pgnPanelTitle");
+  if(title)title.textContent=pgnColor==="w"?"HighTaxi avec les Blancs":"HighTaxi avec les Noirs";
+  const a=$("originalPgnCollection"),b=$("recreatedPgnCollection");
+  if(a)a.value=games.map(g=>String(g.pgn||"").trim()).filter(Boolean).join("\n\n");
+  if(b)b.value="Génération du PGN recréé…";
   document.querySelectorAll(".pgnTab").forEach(x=>x.classList.toggle("active",x.dataset.pgnColor===pgnColor));
+  let index=0,out=[];
+  const step=()=>{if(token!==pgnRenderToken)return;const end=Math.min(index+8,games.length);for(;index<end;index++){const value=recreatedPgn(games[index]);if(value)out.push(value)}if(b)b.value=out.join("\n\n");if(index<games.length)setTimeout(step,0)};
+  setTimeout(step,0);
 }
 async function copyPgnOutput(id){const el=$(id);if(!el)return;try{await navigator.clipboard.writeText(el.value);}catch{el.focus();el.select();document.execCommand("copy");}toast("PGN copié");}
 document.querySelectorAll(".pgnTab").forEach(b=>b.addEventListener("click",()=>{pgnColor=b.dataset.pgnColor;renderPgnCollections();}));
@@ -52,7 +82,14 @@ function loadGlobalMoveAnnotations(){try{const raw=localStorage.getItem("ht_glob
 function saveGlobalMoveAnnotations(){try{localStorage.setItem("ht_global_move_annotations_v1",JSON.stringify(globalMoveAnnotations))}catch{}}
 function globalMoveKey(parentFen,move){const m=typeof move==="string"?null:move;return `${positionKeyFromFen(parentFen)}|${m?`${m.from}-${m.to}-${m.promotion||""}`:String(move)}`}
 function legacyGlobalMoveKey(parentFen,san){return `${positionKeyFromFen(parentFen)}|${san}`}
-function annotationKind(a){if(["❌","⚠️"].includes(a))return "bad";if(["⭐","💡","🎯"].includes(a))return "good";return "neutral"}
+function annotationKind(a){
+  const def=ANNOTATION_DEFS.find(x=>x.icon===a);
+  if(def)return def.kind;
+  if(["❌","⚠️"].includes(a))return "bad";
+  if(["⭐","💡","🎯"].includes(a))return "good";
+  return "neutral";
+}
+function annotationDef(a){return ANNOTATION_DEFS.find(x=>x.icon===a)||{icon:a,label:"Annotation personnelle",kind:annotationKind(a),nag:null}}
 function mergeAnnotationCounts(target,annotations){for(const a of new Set(annotations||[]))target[a]=1}
 function findMoveBySan(fen,san){try{const c=new Chess(fen);for(const m of c.legalMoves())if(c.san(m)===san)return m}catch{}return null}
 
@@ -195,7 +232,7 @@ function positionKeyFromFen(fen){
 }
 async function buildGlobalTree(){
   if(globalTreeBuilding)return;
-  if(globalTree&&globalTreeBuiltFor===allGames.length)return;
+  if(globalTree&&globalTreeBuiltFor===dataRevision)return;
   globalTreeBuilding=true;
   const games=safeGames().filter(g=>g.pgn);
   globalTreeProgress={done:0,total:games.length};
@@ -255,14 +292,17 @@ async function buildGlobalTree(){
       globalTreeProgress.done=end;
       globalTree={nodes};
       renderGlobalTree(currentNode?.fen||Chess.START_FEN);
+      renderMoves();
       await new Promise(r=>setTimeout(r,0));
     }
     saveGlobalMoveAnnotations();
     globalTree={nodes};
-    globalTreeBuiltFor=allGames.length;
+    globalTreeBuiltFor=dataRevision;
+    renderMoves();
   }finally{
     globalTreeBuilding=false;
     renderGlobalTree(currentNode?.fen||Chess.START_FEN);
+    renderMoves();
   }
 }
 function gaugeMarkup(stats,total){
@@ -273,6 +313,7 @@ function gaugeMarkup(stats,total){
 }
 
 function renderGlobalArrows(fen){
+  if(!appSettings.showArrows)return;
   const board=$("board");if(!board||!globalTree)return;
   board.querySelector(".moveArrows")?.remove();
   const node=globalTree.nodes.get(positionKeyFromFen(fen));if(!node?.children?.size)return;
@@ -305,7 +346,7 @@ function renderGlobalTree(fen){
   try{renderGlobalArrows(fen)}catch(err){console.warn("Global arrows disabled for this render",err)}
 }
 
-function invalidateGlobalTree(){globalTree=null;globalTreeBuiltFor=0;globalTreeProgress={done:0,total:0};}
+function invalidateGlobalTree(){globalTree=null;globalTreeBuiltFor=0;globalTreeProgress={done:0,total:0};dataRevision++;trainingCacheRevision=-1;trainingCache=[];pgnRenderToken++;}
 function renderHome(){
   $("homeGames").textContent=safeGames().length;
   const g=sorted()[0];$("homeLast").textContent=g?`${g.white||"?"} — ${g.black||"?"} · ${g.result||"*"} · ${g.source||"PGN"}`:"Aucune partie";
@@ -322,11 +363,16 @@ function renderStats(){
   if(box)box.innerHTML=top.length?top.map(([k,v])=>`<div class="statLine"><span>${esc(k)}</span><b>${v}</b></div>`).join(""):"<span class=\"muted\">Aucune donnée</span>";
 }
 function renderTraining(){
-  const box=$("trainingList");if(!box)return;const items=[];
-  for(const g of safeGames()){
-    if(!g.analysisTree)continue;
-    try{const root=restoreTree(g.analysisTree);const walk=n=>{for(const c of n.children||[]){if((c.annotations?.length||0)||c.note?.trim())items.push({g,node:c});walk(c)}};walk(root)}catch{}
+  const box=$("trainingList");if(!box)return;
+  if(trainingCacheRevision!==dataRevision){
+    const items=[];
+    for(const g of safeGames()){
+      if(!g.analysisTree)continue;
+      try{const root=restoreTree(g.analysisTree);const walk=n=>{for(const c of n.children||[]){if((c.annotations?.length||0)||c.note?.trim())items.push({g,node:c});walk(c)}};walk(root)}catch{}
+    }
+    trainingCache=items;trainingCacheRevision=dataRevision;
   }
+  const items=trainingCache;
   $("trainingText").textContent=items.length?`${items.length} position(s) à revoir.`:"Tes positions annotées apparaîtront ici.";
   if(!items.length){box.innerHTML='<div class="empty">Aucune position annotée. Depuis une partie, ajoute une annotation ou une note.</div>';return}
   box.innerHTML=items.slice(0,100).map((x,i)=>`<button class="trainingItem" data-game="${esc(x.g.id)}" data-fen="${esc(x.node.fen)}"><b>#${i+1} · ${esc(x.g.white||"?")} — ${esc(x.g.black||"?")}</b><span>${esc((x.node.annotations||[]).join(" "))}${x.node.note?.trim()?" · "+esc(x.node.note.trim().slice(0,70)):""}</span></button>`).join("");
@@ -358,14 +404,14 @@ async function openGame(id){
 let boardRotated=false;
 function boardSquares(){const black=userSide(activeGame)==="b";const flip=black!==boardRotated;const files=flip?["h","g","f","e","d","c","b","a"]:["a","b","c","d","e","f","g","h"];const ranks=flip?[1,2,3,4,5,6,7,8]:[8,7,6,5,4,3,2,1];return {files,ranks}}
 function pieceSVG(p){
-  const key=`${p[0]}${({p:'P',n:'N',b:'B',r:'R',q:'Q',k:'K'})[p[1]]||p[1].toUpperCase()}`;
-  const src=new URL(`./pieces/${key}.png`,import.meta.url).href;
-  return `<img class="pieceSvg ${p[0]==="w"?"whitePiece":"blackPiece"}" data-piece="${key}" src="${src}" alt="" draggable="false" aria-hidden="true">`;
+  const key=`${p[0]}${({p:'P',n:'N',b:'B',r:'R',q:'Q',k:'K'})[p[1]]||String(p[1]||'').toUpperCase()}`;
+  const src=PIECE_DATA[key]||new URL(`./pieces/${key}.png`,import.meta.url).href;
+  return `<img class="pieceSvg ${p[0]==="w"?"whitePiece":"blackPiece"} data-piece="${key}" src="${src}" alt="" draggable="false" aria-hidden="true">`;
 }
 const PIECE_FALLBACK={wK:"♔",wQ:"♕",wR:"♖",wB:"♗",wN:"♘",wP:"♙",bK:"♚",bQ:"♛",bR:"♜",bB:"♝",bN:"♞",bP:"♟"};
 function installPieceFallbacks(container){
   container?.querySelectorAll("img.pieceSvg").forEach(img=>img.addEventListener("error",()=>{
-    const span=document.createElement("span");span.className=`pieceFallback ${img.className}`;span.textContent=PIECE_FALLBACK[img.dataset.piece]||"?";span.setAttribute("aria-hidden","true");img.replaceWith(span);
+    const span=document.createElement("span");span.className=`pieceFallback ${img.className}`;span.textContent=PIECE_FALLBACK[img.dataset.piece]||"♟";span.setAttribute("aria-hidden","true");img.replaceWith(span);
   },{once:true}));
 }
 let boardResizeObserver=null;
@@ -421,7 +467,7 @@ function ensureEngine(){
   return engineReadyPromise;
 }
 function scheduleEngineAnalysis(fen){
-  if(!fen)return;
+  if(!fen||!appSettings.autoEngine)return;
   if(engineUnavailable)return;
   if(engineLastFen===fen&&engineBusy)return;
   if(engineLastFen===fen&&!engineBusy&&engineWorker)return;
@@ -475,8 +521,27 @@ $("board").addEventListener("click",e=>{
   if(chess.board[s]&&chess.board[s][0]===chess.turn){selectedSquare=s;renderBoard()}else{selectedSquare=null;renderBoard()}
 });
 function currentPath(){const path=[];let n=currentNode;while(n&&n.parent){path.unshift(n);n=n.parent}return path}
-function renderMoves(){const root=currentNodeRoot();let html="";const walk=(n,d=0)=>{for(const c of n.children||[]){const turn=new Chess(c.parent.fen).turn,num=Number(c.parent.fen.split(/\s+/)[5]||1),prefix=d?`↳ `:"";html+=`<button class="move ${c===currentNode?"current":""} ${d?"variationMove":""}" style="margin-left:${Math.min(d,6)*10}px" data-node="${esc(c.id)}">${prefix}${turn==="w"?num+".":num+"..."} ${esc(c.san)}</button>`;walk(c,d+1)}};walk(root);["moves","analysisMoves"].forEach(id=>{const el=$(id);if(!el)return;el.innerHTML=html||'<span class="muted">Position initiale</span>';el.querySelectorAll(".move").forEach(b=>b.addEventListener("click",()=>gotoNode(b.dataset.node)));const cur=el.querySelector(".move.current");if(cur)requestAnimationFrame(()=>cur.scrollIntoView({block:"nearest",inline:"nearest"}))});}
-function renderAnalysisMeta(){const head=$("annotationHeadline"),summary=$("annotationSummary");const anns=currentNode?.annotations||[];if(head)head.textContent=anns.length?anns.join(" · "):currentNode?.san?`${currentNode.san} — position analysée`:"Position initiale";if(summary)summary.textContent=currentNode?.note?.trim()|| (anns.length?"Annotation enregistrée sur cette position.":"Ajoute une annotation ou une note à cette position.");}
+function moveOutcomeStats(node){
+  if(!globalTree||!node?.parent?.fen||!node?.move)return null;
+  const parent=globalTree.nodes.get(positionKeyFromFen(node.parent.fen));
+  if(!parent)return null;
+  const key=`${node.move.from||""}-${node.move.to||""}-${node.move.promotion||""}`;
+  return parent.children.get(key)?.stats||null;
+}
+function moveGaugeMarkup(stats){
+  const white=stats?.white||0,draw=stats?.draw||0,black=stats?.black||0,known=white+draw+black;
+  if(!known)return "";
+  const w=Math.round(white/known*100),d=Math.round(draw/known*100),b=Math.max(0,100-w-d);
+  return `<span class="moveGaugeWrap" aria-label="Après ce coup : Blancs ${w} %, nulles ${d} %, Noirs ${b} %"><span class="moveGauge"><i class="gWhite" style="width:${w}%"></i><i class="gDraw" style="width:${d}%"></i><i class="gBlack" style="width:${b}%"></i></span><span class="moveGaugeLabels"><span>Bl ${w}%</span><span>= ${d}%</span><span>No ${b}%</span></span></span>`;
+}
+function renderMoves(){
+  const root=currentNodeRoot();let html="";
+  const walk=(n,d=0)=>{for(const c of n.children||[]){const fields=String(c.parent?.fen||Chess.START_FEN).split(/\s+/),turn=fields[1]||"w",num=Number(fields[5]||1),prefix=d?`↳ `:"",gauge=moveGaugeMarkup(moveOutcomeStats(c));html+=`<button class="move ${c===currentNode?"current":""} ${d?"variationMove":""}" style="margin-left:${Math.min(d,6)*10}px" data-node="${esc(c.id)}"><span class="moveMain">${prefix}${turn==="w"?num+".":num+"..."} ${esc(c.san)}</span>${gauge}</button>`;walk(c,d+1)}};
+  walk(root);
+  ["moves","analysisMoves"].forEach(id=>{const el=$(id);if(!el)return;el.innerHTML=html||'<span class="muted">Position initiale</span>';const cur=el.querySelector(".move.current");if(cur)requestAnimationFrame(()=>cur.scrollIntoView({block:"nearest",inline:"nearest"}))});
+  renderSelectedMoveInsights();
+}
+function renderAnalysisMeta(){const head=$("annotationHeadline"),summary=$("annotationSummary"),icon=$("annotationIcon");const anns=currentNode?.annotations||[];const defs=anns.map(annotationDef);if(icon)icon.textContent=defs[defs.length-1]?.icon||"♟";if(head)head.textContent=defs.length?defs.map(d=>d.label).join(" · "):currentNode?.san?`${currentNode.san} — position analysée`:"Position initiale";if(summary)summary.textContent=currentNode?.note?.trim()|| (anns.length?`${anns.map(d=>d.icon).join(" ")} · Annotation enregistrée sur cette position.`:"Ajoute une annotation ou une note à cette position.");}
 function findNodeByPositionKey(root,key){if(positionKeyFromFen(root?.fen||"")===key)return root;for(const c of root?.children||[]){const found=findNodeByPositionKey(c,key);if(found)return found}return null}
 function gotoPositionKey(key){saveNoteBeforeNavigation();const n=findNodeByPositionKey(currentNodeRoot(),key);if(!n)return false;currentNode=n;chess=new Chess(n.fen);selectedSquare=null;lastMove=n.move?[n.move.from,n.move.to]:null;renderBoard();onPositionChanged();return true}
 function gotoNode(id){saveNoteBeforeNavigation();const n=findNode(currentNodeRoot(),id);if(!n)return;currentNode=n;chess=new Chess(n.fen);selectedSquare=null;lastMove=n.move?[n.move.from,n.move.to]:null;renderBoard();onPositionChanged()}
@@ -484,6 +549,7 @@ function currentNodeRoot(){let n=currentNode;while(n?.parent)n=n.parent;return n
 function renderNav(){$("prevBtn").disabled=!currentNode?.parent;$("nextBtn").disabled=!currentNode?.children?.[0]}
 $("prevBtn").addEventListener("click",()=>{saveNoteBeforeNavigation();if(currentNode?.parent){currentNode=currentNode.parent;chess=new Chess(currentNode.fen);selectedSquare=null;lastMove=currentNode.move?[currentNode.move.from,currentNode.move.to]:null;renderBoard();onPositionChanged()}});
 $("nextBtn").addEventListener("click",()=>{saveNoteBeforeNavigation();if(currentNode?.children?.[0]){currentNode=currentNode.children[0];chess=new Chess(currentNode.fen);selectedSquare=null;lastMove=currentNode.move?[currentNode.move.from,currentNode.move.to]:null;renderBoard();onPositionChanged()}});
+["moves","analysisMoves"].forEach(id=>$(id)?.addEventListener("click",e=>{const b=e.target.closest(".move[data-node]");if(b)gotoNode(b.dataset.node)}));
 
 let noteSaveTimer=null;
 function saveNoteDraft(){if(!currentNode)return;const value=$("note")?.value?.trim()||"";if(value===String(currentNode.note||""))return;currentNode.note=value;schedulePersistAnalysis();}
@@ -491,19 +557,29 @@ $("note")?.addEventListener("input",()=>{clearTimeout(noteSaveTimer);noteSaveTim
 function saveNoteBeforeNavigation(){clearTimeout(noteSaveTimer);saveNoteDraft();}
 
 function renderAnnotations(){
-  const row=$("annotationRow");row.innerHTML="";const set=new Set(currentNode?.annotations||[]);
-  ANNOS.forEach(a=>{const b=document.createElement("button");b.className="anno "+(set.has(a)?"active":"");b.textContent=a;b.addEventListener("click",()=>{
+  const row=$("annotationRow");if(!row)return;row.innerHTML="";const set=new Set(currentNode?.annotations||[]);
+  ANNOTATION_DEFS.forEach(def=>{const b=document.createElement("button");b.type="button";b.className=`anno ${def.kind} ${set.has(def.icon)?"active":""}`;b.textContent=def.icon;b.title=`${def.icon} · ${def.label}`;b.setAttribute("aria-label",def.label);b.addEventListener("click",()=>{
     currentNode.annotations=currentNode.annotations||[];
-    currentNode.annotations=currentNode.annotations.includes(a)?currentNode.annotations.filter(x=>x!==a):[...currentNode.annotations,a];
-    if(currentNode.parent&&currentNode.san){const key=globalMoveKey(currentNode.parent.fen,currentNode.move);const prev=globalMoveAnnotations[key]||{annotations:[],kindCounts:{good:0,bad:0,neutral:0}};const next=[...currentNode.annotations];const counts={good:0,bad:0,neutral:0};next.forEach(x=>counts[annotationKind(x)]++);globalMoveAnnotations[key]={annotations:next,kindCounts:counts};saveGlobalMoveAnnotations();}
+    currentNode.annotations=currentNode.annotations.includes(def.icon)?currentNode.annotations.filter(x=>x!==def.icon):[...currentNode.annotations,def.icon];
+    if(currentNode.parent&&currentNode.san){const key=globalMoveKey(currentNode.parent.fen,currentNode.move);const next=[...currentNode.annotations];const counts={good:0,bad:0,neutral:0};next.forEach(x=>counts[annotationKind(x)]++);globalMoveAnnotations[key]={annotations:next,kindCounts:counts};saveGlobalMoveAnnotations();}
     renderAnnotations();renderBoard();schedulePersistAnalysis();
   });row.appendChild(b)});
   const noteEl=$("note");if(noteEl&&document.activeElement!==noteEl)noteEl.value=currentNode?.note||"";
 }
-async function persistAnalysisSnapshot(snapshot){if(!snapshot)return;await put(snapshot);allGames=allGames.map(g=>g.id===snapshot.id?{...snapshot}:g);if(activeGame?.id===snapshot.id){activeGame={...activeGame,analysisTree:snapshot.analysisTree,annotationCount:snapshot.annotationCount,updatedAt:snapshot.updatedAt}}}
-async function persistAnalysis(){if(!activeGame||!currentNode)return;const stored={...activeGame,analysisTree:serializeTree(currentNodeRoot()),annotationCount:countAnnotations(currentNodeRoot()),updatedAt:Date.now()};delete stored.parsed;await persistAnalysisSnapshot(stored);}
-async function flushPendingPersist(){if(persistTimer){clearTimeout(persistTimer);persistTimer=null;await persistAnalysis();}}
-function schedulePersistAnalysis(){clearTimeout(persistTimer);if(!activeGame||!currentNode)return;const snapshot={...activeGame,analysisTree:serializeTree(currentNodeRoot()),annotationCount:countAnnotations(currentNodeRoot()),updatedAt:Date.now()};delete snapshot.parsed;persistTimer=setTimeout(async()=>{persistTimer=null;try{await persistAnalysisSnapshot(snapshot);renderHome();renderTraining()}catch(e){toast("Autosauvegarde impossible : "+e.message)}},500)}
+function renderSelectedMoveInsights(){
+  const box=$("moveInsights");if(!box)return;
+  const node=currentNode;
+  if(!node?.move){box.innerHTML='<div class="muted">Sélectionne un coup pour voir ses statistiques.</div>';return}
+  const stats=moveOutcomeStats(node),white=stats?.white||0,draw=stats?.draw||0,black=stats?.black||0,total=white+draw+black;
+  const anns=(node.annotations||[]).map(annotationDef);
+  box.innerHTML=`<div class="insightMove"><b>${esc(node.san||"—")}</b><span class="muted">${node.parent?.fen===Chess.START_FEN?"Position initiale":"Position sélectionnée"}</span></div>${total?gaugeMarkup(stats,total):'<div class="muted">Pas encore assez de données dans la base pour ce coup.</div>'}<div class="insightAnnotations"><b>Annotations</b><div>${anns.length?anns.map(a=>`<span title="${esc(a.label)}">${esc(a.icon)}</span>`).join(" "):"Aucune"}</div></div>${node.note?.trim()?`<div class="insightNote">${esc(node.note.trim())}</div>`:""}`;
+}
+
+async function persistAnalysisSnapshot(snapshot){if(!snapshot)return;await put(snapshot);allGames=allGames.map(g=>g.id===snapshot.id?{...snapshot}:g);if(activeGame?.id===snapshot.id){activeGame={...activeGame,analysisTree:snapshot.analysisTree,annotationCount:snapshot.annotationCount,updatedAt:snapshot.updatedAt}}invalidateGlobalTree();}
+async function persistAnalysis(){if(!activeGame||!currentNode)return;const root=currentNodeRoot();const stored={...activeGame,analysisTree:serializeTree(root),annotationCount:countAnnotations(root),updatedAt:Date.now()};delete stored.parsed;await persistAnalysisSnapshot(stored);}
+function scheduleBackgroundPersist(){if(!activeGame||!currentNode)return;clearTimeout(persistTimer);persistTimer=setTimeout(()=>{persistTimer=null;void persistAnalysis().then(()=>{renderHome();renderTraining()}).catch(e=>toast("Autosauvegarde impossible : "+e.message));},80)}
+async function flushPendingPersist(){if(!persistTimer)return;clearTimeout(persistTimer);persistTimer=null;await new Promise(resolve=>setTimeout(()=>{void persistAnalysis().finally(resolve)},0));}
+function schedulePersistAnalysis(){if(!activeGame||!currentNode)return;clearTimeout(persistTimer);persistTimer=setTimeout(()=>{persistTimer=null;void persistAnalysis().then(()=>{renderHome();renderTraining()}).catch(e=>toast("Autosauvegarde impossible : "+e.message));},500)}
 $("rotateBoardBtn")?.addEventListener("click",()=>{boardRotated=!boardRotated;renderBoard();});
 $("analysisBackBtn")?.addEventListener("click",()=>{nav(activeGame?"games":"home")});
 $("analysisSearchBtn")?.addEventListener("click",()=>{nav("games");setTimeout(()=>$("gameSearch")?.focus(),0)});
@@ -533,10 +609,13 @@ $("pgnFile").addEventListener("change",async e=>{
   }catch(err){toast("Import PGN refusé : "+err.message)}finally{e.target.value=""}
 });
 
-$("exportBtn")?.addEventListener("click",()=>{
+function exportActiveGamePgn(){
   if(!activeGame?.parsed){toast("Aucune partie ouverte");return}
-  try{const out=exportPGN(activeGame.parsed);const blob=new Blob([out],{type:"application/x-chess-pgn"});const url=URL.createObjectURL(blob),a=document.createElement("a");a.href=url;const safeName=v=>String(v||"").replace(/[\\/:*?"<>|]+/g,"_").replace(/\s+/g," ").trim()||"Unknown";a.download=`HighTaxi_${safeName(activeGame.white)}_${safeName(activeGame.black)}.pgn`;a.click();setTimeout(()=>URL.revokeObjectURL(url),500)}catch(e){toast("Export impossible : "+e.message)}
-});
+  try{const out=exportPGN(activeGame.parsed);const blob=new Blob([out],{type:"application/x-chess-pgn"});const url=URL.createObjectURL(blob),a=document.createElement("a");a.href=url;const safeName=v=>String(v||"").replace(/[\\/:*?"<>|]+/g,"_").replace(/\s+/g," ").trim()||"Unknown";a.download=`HighTaxi_${safeName(activeGame.white)}_${safeName(activeGame.black)}.pgn`;a.click();setTimeout(()=>URL.revokeObjectURL(url),500);toast("PGN exporté")}
+  catch(e){toast("Export impossible : "+e.message)}
+}
+$("exportBtn")?.addEventListener("click",exportActiveGamePgn);
+$("analysisExportBtn")?.addEventListener("click",exportActiveGamePgn);
 
 $("backupBtn").addEventListener("click",async()=>{try{const games=await getAll();const data=JSON.stringify({format:"HighTaxi Chess Backup",version:APP_VERSION,schemaVersion:DATA_SCHEMA_VERSION,exportedAt:new Date().toISOString(),gameCount:games.length,globalMoveAnnotations,chessSyncArchives:JSON.parse(localStorage.getItem(CHESS_SYNC_KEY)||"[]"),games});const blob=new Blob([data],{type:"application/json"}),url=URL.createObjectURL(blob),a=document.createElement("a");a.href=url;a.download=`HighTaxiChess-backup-${new Date().toISOString().slice(0,10)}.json`;a.click();setTimeout(()=>URL.revokeObjectURL(url),500);toast(`${games.length} partie(s) sauvegardée(s)`)}catch(e){toast("Sauvegarde impossible : "+e.message)}});
 $("restoreBtn").addEventListener("click",()=>$("backupFile").click());
@@ -615,10 +694,17 @@ $("syncBtn").addEventListener("click",async()=>{
   }
 });
 
-$("settingsBtn").addEventListener("click",async()=>{const est=await estimateStorage();toast(`Compte Chess.com : ${USER} · IndexedDB · v${APP_VERSION}${est?.usage?` · ${(est.usage/1024/1024).toFixed(1)} Mo utilisés`:""}`)});
+$("settingsBtn").addEventListener("click",async()=>{const panel=$("settingsPanel");if(panel){panel.classList.add("open");panel.setAttribute("aria-hidden","false");}await renderSettings();});
+$("settingsClose")?.addEventListener("click",()=>{const p=$("settingsPanel");p?.classList.remove("open");p?.setAttribute("aria-hidden","true")});
+$("settingsPanel")?.addEventListener("click",e=>{if(e.target.id==="settingsPanel")$("settingsClose")?.click()});
+async function renderSettings(){const est=await estimateStorage();$("settingsAccount")?.replaceChildren(document.createTextNode(USER));$("settingsVersion")?.replaceChildren(document.createTextNode(APP_VERSION));$("settingsStorage")?.replaceChildren(document.createTextNode(est?.usage?`${(est.usage/1024/1024).toFixed(1)} Mo utilisés`:"Indisponible"));["autoEngine","showArrows","compactMoves"].forEach(k=>{const el=$("setting_"+k);if(el)el.checked=!!appSettings[k]});}
+["autoEngine","showArrows","compactMoves"].forEach(k=>$("setting_"+k)?.addEventListener("change",e=>{appSettings[k]=e.target.checked;saveAppSettings();if(k==="showArrows")renderBoard();if(k==="compactMoves")document.body.classList.toggle("compactMoves",!!appSettings.compactMoves);if(k==="autoEngine"&&appSettings.autoEngine)onPositionChanged()}));
+$("settingsRebuild")?.addEventListener("click",()=>{invalidateGlobalTree();if(document.body.classList.contains("analysisActive"))buildGlobalTree();toast("Arbre global en reconstruction")});
+$("settingsEngineReset")?.addEventListener("click",()=>{try{engineWorker?.terminate()}catch{}engineWorker=null;engineReadyPromise=null;engineUnavailable=false;engineSearchToken++;if(appSettings.autoEngine)onPositionChanged();toast("Stockfish réinitialisé")});
+$("settingsClearCaches")?.addEventListener("click",()=>{recreatedPgnCache.clear();trainingCache=[];trainingCacheRevision=-1;invalidateGlobalTree();toast("Caches locaux vidés")});
 
 async function boot(){
-  try{await migrateLegacy();await migrateChessComStableIds();requestPersistence().catch(()=>{});allGames=await getAll();renderHome();renderGames();renderStats();renderTraining();installBoardResizeObserver();renderBoard();
+  try{await migrateLegacy();await migrateChessComStableIds();requestPersistence().catch(()=>{});allGames=await getAll();renderHome();renderGames();renderStats();renderTraining();installBoardResizeObserver();document.body.classList.toggle("compactMoves",!!appSettings.compactMoves);renderBoard();
     const hash=location.hash;if(hash==="#board"||hash==="#games")nav(hash.slice(1)==="board"?"boardScreen":"games");else nav("boardScreen");
   }catch(e){toast("Erreur de stockage : "+e.message);renderBoard()}
 }

@@ -1,4 +1,4 @@
-# HighTaxi Chess PWA — v0.9.13 GitHub Pages
+# HighTaxi Chess PWA — v0.9.16 GitHub Pages
 
 PWA personnelle mobile-first pour importer, synchroniser, analyser et annoter les parties de HighTaxi.
 
@@ -43,7 +43,7 @@ Le build utilisé est **lite single-thread**, adapté aux navigateurs mobiles et
 
 La version livrée fonctionne donc en ligne sans binaire local. Pour une analyse totalement hors ligne, les deux binaires doivent être ajoutés dans `stockfish/`.
 
-## Correctifs v0.9.13
+## Correctifs v0.9.16
 
 - Suppression complète de la dépendance au proxy `/api/chesscom` et à Cloudflare Pages.
 - Synchronisation Chess.com refondue autour des PGN mensuels, avec retry et timeout.
@@ -51,7 +51,7 @@ La version livrée fonctionne donc en ligne sans binaire local. Pour une analyse
 - Validation des PGN Chess.com avant insertion.
 - Exclusion des variantes non standard.
 - Rafraîchissement de la collection PGN après synchronisation.
-- Cache Service Worker passé en `v0.9.13` et rendu **network-first** pour éviter de rester bloqué sur une ancienne version après un déploiement GitHub Pages.
+- Cache Service Worker passé en `v0.9.16` et rendu **network-first** pour éviter de rester bloqué sur une ancienne version après un déploiement GitHub Pages.
 - Ajout de `.nojekyll`.
 - Suppression du fichier `_headers` et du dossier `functions/`, inutiles sur GitHub Pages.
 - Correction de robustesse des pièces : chemins relatifs + fallback Unicode si une image PNG est absente ou bloquée.
@@ -96,3 +96,12 @@ node test-analysis-ui.mjs
 ```
 
 Le fichier `test-import-regression.mjs` utilise également le PGN Chess.com fourni avec le projet lorsqu’il est disponible à `/mnt/data/ChessCom_hightaxi_202609.pgn`.
+
+
+## v0.9.16
+- Annotations de qualité : !!, !, ★, 👍, ✓, 📖, ?!, ?, ❌, ??.
+- Export PGN depuis Analyse.
+- Panneau Réglages réel.
+- Statistiques du coup sélectionné et jauge Blancs / nulles / Noirs.
+- Persistance d’analyse non bloquante lors des changements d’onglet.
+- Optimisation du rendu des coups et des variantes.
