@@ -1,4 +1,4 @@
-# HighTaxi Chess PWA — v0.9.17 GitHub Pages
+# HighTaxi Chess PWA — v0.9.18 GitHub Pages
 
 PWA personnelle mobile-first pour importer, synchroniser, analyser et annoter les parties de HighTaxi.
 
@@ -35,15 +35,15 @@ La disponibilité exacte des requêtes navigateur dépend des politiques CORS ac
 
 Le Worker tente dans cet ordre :
 
-1. fichiers locaux `stockfish/stockfish-18-lite-single.{js,wasm}` s’ils sont ajoutés au dépôt ;
+1. fichiers locaux `stockfish/stockfish-19-lite-single.{js,wasm}` s’ils sont ajoutés au dépôt ;
 2. copie GitHub publique de Stockfish.js 18 ;
 3. CDN jsDelivr en second secours.
 
-Le build utilisé est **lite single-thread**, adapté aux navigateurs mobiles et ne nécessitant pas `SharedArrayBuffer`. Le projet de référence utilisé pour le fallback publie bien les fichiers `stockfish-18-lite-single.js` et `.wasm`.
+Le build utilisé est **lite single-thread**, adapté aux navigateurs mobiles et ne nécessitant pas `SharedArrayBuffer`. Le projet de référence utilisé pour le fallback publie bien les fichiers `stockfish-19-lite-single.js` et `.wasm`.
 
 La version livrée fonctionne donc en ligne sans binaire local. Pour une analyse totalement hors ligne, les deux binaires doivent être ajoutés dans `stockfish/`.
 
-## Correctifs v0.9.17
+## Correctifs v0.9.18
 
 - Suppression complète de la dépendance au proxy `/api/chesscom` et à Cloudflare Pages.
 - Synchronisation Chess.com refondue autour des PGN mensuels, avec retry et timeout.
@@ -51,7 +51,7 @@ La version livrée fonctionne donc en ligne sans binaire local. Pour une analyse
 - Validation des PGN Chess.com avant insertion.
 - Exclusion des variantes non standard.
 - Rafraîchissement de la collection PGN après synchronisation.
-- Cache Service Worker passé en `v0.9.17` et rendu **network-first** pour éviter de rester bloqué sur une ancienne version après un déploiement GitHub Pages.
+- Cache Service Worker passé en `v0.9.18` et rendu **network-first** pour éviter de rester bloqué sur une ancienne version après un déploiement GitHub Pages.
 - Ajout de `.nojekyll`.
 - Suppression du fichier `_headers` et du dossier `functions/`, inutiles sur GitHub Pages.
 - Correction de robustesse des pièces : chemins relatifs + fallback Unicode si une image PNG est absente ou bloquée.
@@ -98,7 +98,7 @@ node test-analysis-ui.mjs
 Le fichier `test-import-regression.mjs` utilise également le PGN Chess.com fourni avec le projet lorsqu’il est disponible à `/mnt/data/ChessCom_hightaxi_202609.pgn`.
 
 
-## v0.9.17
+## v0.9.18
 - Nouvelles annotations visuelles en pastilles pastel selon la palette Source.
 - Onglets d’analyse `Toutes / HighTaxi Blancs / HighTaxi Noirs` pour filtrer l’arbre et les jauges.
 - Prochains coups visibles directement sous l’analyse, avec statistiques Blancs / nulles / Noirs.

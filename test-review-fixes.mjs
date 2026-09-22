@@ -7,7 +7,7 @@ const db=fs.readFileSync('./db.js','utf8');
 const pgn=fs.readFileSync('./pgn.js','utf8');
 const index=fs.readFileSync('./index.html','utf8');
 
-assert.match(sw,/CACHE=.*v0\.9\.17/,'Service Worker doit être versionné pour invalider l’ancien cache');
+assert.match(sw,/CACHE=.*v0\.9\.18/,'Service Worker doit être versionné pour invalider l’ancien cache');
 assert.match(sw,/Network-first|fresh=await refresh/,'Le shell doit être rafraîchi après un déploiement');
 assert.doesNotMatch(sw,/\/api\//,'Le Service Worker ne doit plus prévoir une route proxy Cloudflare');
 assert.match(app,/return c\.san\(move\)/,'UCI vers SAN doit utiliser Chess.san sans muter la position');
@@ -16,8 +16,8 @@ assert.match(app,/saveNoteBeforeNavigation\(\);\n?      let move=candidates\[0\]
 assert.match(app,/parsePGN\(source\)|parsePGN\(raw\)/,'Les PGN importés doivent être validés par le parseur');
 assert.match(app,/chessComPgnIsStandard/,'Les variantes Chess.com non standard doivent être ignorées');
 assert.match(app,/\$\("exportBtn"\)\?\.addEventListener/,'Le bouton export absent ne doit pas bloquer le démarrage');
-assert.match(app,/raw\.githubusercontent\.com\/solid-apps\/stockfish\/gh-pages\/vendor\/stockfish-18-lite-single\.js/,'Stockfish doit avoir un fallback GitHub');
-assert.match(app,/cdn\.jsdelivr\.net\/npm\/stockfish@18\.0\.8\/bin\/stockfish-18-lite-single\.js/,'Stockfish doit avoir un second fallback CDN');
+assert.match(app,/github\.com\/nmrugg\/stockfish\.js\/releases\/download\/v19\.0\.0\/stockfish-19-lite-single\.js/,'Stockfish doit avoir un fallback GitHub');
+assert.match(app,/cdn\.jsdelivr\.net\/npm\/stockfish@19\.0\.0\/bin\/stockfish-19-lite-single\.js/,'Stockfish doit avoir un fallback CDN');
 assert.match(app,/new URL\("\.\/stockfish-worker\.js",import\.meta\.url\)/,'Le Worker doit être résolu relativement au module');
 assert.match(app,/new URL\(`\.\/pieces\/\$\{key\}\.png`,import\.meta\.url\)/,'Les pièces doivent être résolues relativement au module');
 assert.match(app,/installPieceFallbacks\(board\)/,'Une pièce de secours doit éviter les icônes cassées');

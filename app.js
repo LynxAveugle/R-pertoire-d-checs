@@ -20,7 +20,7 @@ const ANNOTATION_DEFS=[
 const CHESS_DRAW_RESULTS=new Set(["agreed","stalemate","repetition","insufficient","timevsinsufficient","50move","50_moves","draw"]);
 const CHESS_SYNC_KEY="ht_chess_sync_archives_v3";
 let allGames=[],activeGame=null,currentNode=null,chess=new Chess(),selectedSquare=null,lastMove=null;
-let globalTree=null,globalTreeBuilding=false,globalTreeBuiltFor=0,globalTreeProgress={done:0,total:0},globalTreeSideFilter="all",globalTreePendingFilter=null;
+let globalTree=null,globalTreeBuilding=false,globalTreeBuiltFor=0,globalTreeProgress={done:0,total:0},globalTreeSideFilter="all",globalTreePendingFilter=null,analysisScope="all";
 let dataRevision=0,trainingCacheRevision=-1,trainingCache=[];
 let pgnRenderToken=0;
 let persistTimer=null,engineWorker=null,engineReadyPromise=null,engineSearchToken=0,engineLastFen="",enginePendingFen=null,engineBusy=false,engineUnavailable=false,clubState=null;
@@ -304,7 +304,7 @@ async function buildGlobalTree(){
     globalTreeBuilding=false;
     renderGlobalTree(currentNode?.fen||Chess.START_FEN);
     renderMoves();
-    if(globalTreePendingFilter!==null && globalTreePendingFilter!==globalTree?._filter){const next=globalTreePendingFilter;globalTreePendingFilter=null;globalTreeSideFilter=next;globalTree=null;globalTreeBuiltFor=0;setTimeout(()=>buildGlobalTree(),0);}
+    if(globalTreePendingFilter!==null && globalTreePendingFilter!==globalTree?._filter){const next=globalTreePendingFilter;globalTreePendingFilter=null;globalTreeSideFilter=next;analysisScope=next;globalTree=null;globalTreeBuiltFor=0;setTimeout(()=>buildGlobalTree(),0);}
   }
 }
 function gaugeMarkup(stats,total){
@@ -319,7 +319,11 @@ function renderGlobalArrows(fen){
   const board=$("board");if(!board||!globalTree)return;
   board.querySelector(".moveArrows")?.remove();
   const node=globalTree.nodes.get(positionKeyFromFen(fen));if(!node?.children?.size)return;
-  const edges=[...node.children.values()].sort((a,b)=>b.count-a.count).slice(0,12);
+  const sideToMove=String(fen||"").split(/\s+/)[1]||"w";
+  const mine=globalTreeSideFilter==="w"||globalTreeSideFilter==="b"?globalTreeSideFilter:userSide(activeGame);
+  let edges=[...node.children.values()];
+  if(mine===sideToMove){const mineEdges=edges.filter(e=>e.playedByUser>0);if(mineEdges.length)edges=mineEdges;}
+  edges=edges.sort((a,b)=>b.playedByUser-a.playedByUser||b.count-a.count).slice(0,12);
   const {files,ranks}=boardSquares();
   const svg=document.createElementNS("http://www.w3.org/2000/svg","svg");svg.classList.add("moveArrows");svg.setAttribute("viewBox","0 0 100 100");svg.setAttribute("aria-hidden","true");
   const defs=document.createElementNS("http://www.w3.org/2000/svg","defs");
@@ -345,7 +349,7 @@ function renderGlobalTree(fen){
   if(!edges.length){box.innerHTML=`<div class="treeTitle">Aucun coup enregistré depuis cette position.</div>`;return}
   const filterLabel=globalTreeSideFilter==="w"?"tes parties avec les Blancs":globalTreeSideFilter==="b"?"tes parties avec les Noirs":"toutes tes parties";
   box.innerHTML=`<div class="analysisScopeTabs" role="tablist"><button class="analysisScopeTab ${globalTreeSideFilter==="all"?"active":""}" data-side="all">Toutes</button><button class="analysisScopeTab ${globalTreeSideFilter==="w"?"active":""}" data-side="w">HighTaxi Blancs</button><button class="analysisScopeTab ${globalTreeSideFilter==="b"?"active":""}" data-side="b">HighTaxi Noirs</button></div><div class="treeTitle">${node.count.toLocaleString("fr-FR")} partie(s) · ${edges.length} prochain(s) coup(s) · ${filterLabel}</div><div class="treeBranches">${edges.map(e=>{const anns=Object.entries(e.annotations||{}).sort((a,b)=>b[1]-a[1]).slice(0,4).map(([a,n])=>`${a}${n>1?`×${n}`:""}`).join(" ");return `<button class="treeBranch" data-fen="${esc(e.node.fen)}" data-game="${esc(e.sampleGameId||"")}"><div class="treeMoveBlock"><span class="treeMove">${esc(e.san)}</span><span class="treeCount">${e.count.toLocaleString("fr-FR")} partie(s)</span>${e.playedByUser?`<span class="treeMine">${e.playedByUser}× par toi</span>`:""}</div>${gaugeMarkup(e.stats,e.count)}<div class="treeAnnotations">${anns||"—"}</div></button>`}).join("")}</div>`;
-  box.querySelectorAll(".analysisScopeTab").forEach(b=>b.addEventListener("click",()=>{const next=b.dataset.side||"all";if(next===globalTreeSideFilter)return;globalTreeSideFilter=next;globalTree=null;globalTreeBuiltFor=0;if(globalTreeBuilding){globalTreePendingFilter=next;}else{buildGlobalTree();}}));
+  box.querySelectorAll(".analysisScopeTab").forEach(b=>b.addEventListener("click",()=>setAnalysisScope(b.dataset.side||"all")));
   box.querySelectorAll(".treeBranch").forEach(b=>b.addEventListener("click",async()=>{renderGlobalTree(b.dataset.fen);if(b.dataset.game){await openGame(b.dataset.game);gotoPositionKey(positionKeyFromFen(b.dataset.fen));}}));
   try{renderGlobalArrows(fen)}catch(err){console.warn("Global arrows disabled for this render",err)}
 }
@@ -402,11 +406,11 @@ async function openGame(id){
     const tree=g.analysisTree?restoreTree(g.analysisTree):parsed.root;
     // Keep the parsed headers/result while replacing only the analysis tree.
     parsed.root=tree; if(g.analysisTree)parsed.startFen=tree.fen;
-    activeGame={...g,parsed};currentNode=tree;chess=new Chess(tree.fen);selectedSquare=null;lastMove=null;boardRotated=false;globalTreeSideFilter=userSide(g)||"all";globalTree=null;globalTreeBuiltFor=0;nav("boardScreen");
+    activeGame={...g,parsed};currentNode=tree;chess=new Chess(tree.fen);selectedSquare=null;lastMove=null;boardRotated=false;analysisScope=userSide(g)||"all";globalTreeSideFilter=analysisScope;globalTree=null;globalTreeBuiltFor=0;nav("boardScreen");
   }catch(e){toast("Impossible de charger la partie : "+e.message)}
 }
 let boardRotated=false;
-function boardSquares(){const black=userSide(activeGame)==="b";const flip=black!==boardRotated;const files=flip?["h","g","f","e","d","c","b","a"]:["a","b","c","d","e","f","g","h"];const ranks=flip?[1,2,3,4,5,6,7,8]:[8,7,6,5,4,3,2,1];return {files,ranks}}
+function boardSquares(){const scopeSide=analysisScope==="w"||analysisScope==="b"?analysisScope:userSide(activeGame);const black=scopeSide==="b";const flip=black!==boardRotated;const files=flip?["h","g","f","e","d","c","b","a"]:["a","b","c","d","e","f","g","h"];const ranks=flip?[1,2,3,4,5,6,7,8]:[8,7,6,5,4,3,2,1];return {files,ranks}}
 function pieceSVG(p){
   const key=`${p[0]}${({p:'P',n:'N',b:'B',r:'R',q:'Q',k:'K'})[p[1]]||String(p[1]||'').toUpperCase()}`;
   const src=PIECE_DATA[key]||new URL(`./pieces/${key}.png`,import.meta.url).href;
@@ -456,12 +460,12 @@ function ensureEngine(){
   if(engineReadyPromise)return engineReadyPromise;
   engineReadyPromise=new Promise((resolve,reject)=>{
     const workerCandidates=[
-      {js:new URL("./stockfish/stockfish-18-lite-single.js",import.meta.url).href,wasm:new URL("./stockfish/stockfish-18-lite-single.wasm",import.meta.url).href,label:"local"},
-      {js:"https://raw.githubusercontent.com/solid-apps/stockfish/gh-pages/vendor/stockfish-18-lite-single.js",wasm:"https://raw.githubusercontent.com/solid-apps/stockfish/gh-pages/vendor/stockfish-18-lite-single.wasm",label:"GitHub"},
-      {js:"https://cdn.jsdelivr.net/npm/stockfish@18.0.8/bin/stockfish-18-lite-single.js",wasm:"https://cdn.jsdelivr.net/npm/stockfish@18.0.8/bin/stockfish-18-lite-single.wasm",label:"jsDelivr"}
+      {js:new URL("./stockfish/stockfish-19-lite-single.js",import.meta.url).href,wasm:new URL("./stockfish/stockfish-19-lite-single.wasm",import.meta.url).href,label:"local"},
+      {js:"https://cdn.jsdelivr.net/npm/stockfish@19.0.0/bin/stockfish-19-lite-single.js",wasm:"https://cdn.jsdelivr.net/npm/stockfish@19.0.0/bin/stockfish-19-lite-single.wasm",label:"jsDelivr"},
+      {js:"https://github.com/nmrugg/stockfish.js/releases/download/v19.0.0/stockfish-19-lite-single.js",wasm:"https://github.com/nmrugg/stockfish.js/releases/download/v19.0.0/stockfish-19-lite-single.wasm",label:"GitHub release"}
     ];
     let candidateIndex=0;
-    const makeWorker=()=>{const c=workerCandidates[candidateIndex];const base=new URL("./stockfish-worker.js",import.meta.url);base.search=`?engine=${encodeURIComponent(c.js)}`;base.hash=`${encodeURIComponent(c.wasm)},worker`;return new Worker(base);};
+    const makeWorker=()=>{const c=workerCandidates[candidateIndex];const base=new URL("./stockfish-worker.js",import.meta.url);base.search=`?engine=${encodeURIComponent(c.js)}&wasm=${encodeURIComponent(c.wasm)}`;return new Worker(base);};
     const w=makeWorker();engineWorker=w;let ready=false,done=false;
     const fail=(err)=>{if(done)return;done=true;engineBusy=false;try{w.terminate()}catch{};engineWorker=null;engineReadyPromise=null;setEngineUnavailable();reject(err)};
     const timer=setTimeout(()=>fail(new Error("Stockfish ne répond pas")),20000);
@@ -490,8 +494,22 @@ function scheduleEngineAnalysis(fen){
 function onPositionChanged(){if(currentNode?.fen)scheduleEngineAnalysis(currentNode.fen);}
 $("engineRetry")?.addEventListener("click",()=>{engineUnavailable=false;engineReadyPromise=null;engineWorker=null;enginePendingFen=currentNode?.fen||Chess.START_FEN;engineSearchToken++;ensureEngine().then(()=>{if(enginePendingFen&&!engineBusy)startEngineSearch(enginePendingFen)}).catch(()=>{})});
 
+function renderAnalysisScope(){
+  const box=$("analysisScopeBar");if(!box)return;
+  const current=analysisScope;
+  box.querySelectorAll(".analysisScopeTopTab").forEach(b=>b.classList.toggle("active",b.dataset.side===current));
+  const label=current==="w"?"HighTaxi — Blancs":current==="b"?"HighTaxi — Noirs":"Toutes les parties";
+  const hint=$("analysisScopeHint");if(hint)hint.textContent=label;
+}
+function setAnalysisScope(side){
+  const next=side==="w"||side==="b"?side:"all";
+  if(next===analysisScope){renderAnalysisScope();return;}
+  analysisScope=next;globalTreeSideFilter=next;analysisScope=next;globalTree=null;globalTreeBuiltFor=0;globalTreePendingFilter=null;
+  renderAnalysisScope();renderBoard();
+  if(!globalTreeBuilding)buildGlobalTree();
+}
 function renderBoard(){
-  const board=$("board");if(!board)return;board.innerHTML="";
+  const board=$("board");if(!board)return;board.innerHTML="";renderAnalysisScope();
   if(!currentNode){currentNode={fen:Chess.START_FEN,children:[],annotations:[],comment:"",note:"",nags:[]};chess=new Chess();}
   const {files,ranks}=boardSquares(),legal=new Set(selectedSquare?chess.legalMoves(selectedSquare).map(m=>m.to):[]);
   for(let row=0;row<8;row++)for(let col=0;col<8;col++){

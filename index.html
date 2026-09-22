@@ -47,7 +47,12 @@
   </div>
   <div class="analysisLayout">
     <div class="analysisBoardColumn">
-      <div id="boardPlayers" class="boardPlayers">Position initiale · HighTaxi Chess</div>
+      <div id="boardPlayers" class="boardPlayers">Position initiale · HighTaxi Chess</div><div id="analysisScopeBar" class="analysisScopeBar" role="tablist" aria-label="Parties à afficher dans l’analyse">
+<button class="analysisScopeTopTab" type="button" data-side="all">Toutes</button>
+<button class="analysisScopeTopTab" type="button" data-side="w">HighTaxi Blancs</button>
+<button class="analysisScopeTopTab" type="button" data-side="b">HighTaxi Noirs</button>
+<span id="analysisScopeHint" class="analysisScopeHint">Toutes les parties</span>
+</div>
       <div class="boardWrap"><div id="board" class="board" aria-label="Échiquier"></div></div>
       <div id="position" class="position">Position de départ · Blancs</div>
       <div class="analysisControls">
