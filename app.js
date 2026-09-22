@@ -4,7 +4,7 @@ import {PIECE_DATA} from "./piece-assets.js";
 import {parsePGN,exportPGN,headersFrom,splitGames,openingLineUltraFast} from "./pgn.js";
 import {getAll,put,putMany,remove,clearAll,replaceAll,migrateLegacy,requestPersistence,estimateStorage} from "./db.js";
 
-const USER="HighTaxi";
+const DEFAULT_USER="HighTaxi";
 const ANNOTATION_DEFS=[
   {icon:"!!",label:"Excellent / décisif",kind:"good",nag:3},
   {icon:"!",label:"Bon coup",kind:"good",nag:1},
@@ -19,16 +19,30 @@ const ANNOTATION_DEFS=[
 ];
 const CHESS_DRAW_RESULTS=new Set(["agreed","stalemate","repetition","insufficient","timevsinsufficient","50move","50_moves","draw"]);
 const CHESS_SYNC_KEY="ht_chess_sync_archives_v3";
+const CHESS_SYNC_STATUS_KEY="ht_chess_sync_status_v1";
+function loadSyncStatus(){try{return JSON.parse(localStorage.getItem(CHESS_SYNC_STATUS_KEY)||"null")}catch{return null}}
+function saveSyncStatus(status){try{localStorage.setItem(CHESS_SYNC_STATUS_KEY,JSON.stringify(status))}catch{}}
+function renderSyncStatus(){const el=$("syncStatus");if(!el)return;const s=loadSyncStatus();if(!s){el.textContent="Aucune synchronisation effectuée";return}const when=s.at?new Date(s.at).toLocaleString("fr-FR"):"inconnue";el.textContent=`Dernière sync : ${s.ok?"réussie":"échouée"} · ${when}${s.message?` · ${s.message}`:""}`;}
 let allGames=[],activeGame=null,currentNode=null,chess=new Chess(),selectedSquare=null,lastMove=null;
 let globalTree=null,globalTreeBuilding=false,globalTreeBuiltFor=0,globalTreeProgress={done:0,total:0},globalTreeSideFilter="all",globalTreePendingFilter=null,analysisScope="all";
 let dataRevision=0,trainingCacheRevision=-1,trainingCache=[];
 let pgnRenderToken=0;
 let persistTimer=null,engineWorker=null,engineReadyPromise=null,engineSearchToken=0,engineLastFen="",enginePendingFen=null,engineBusy=false,engineUnavailable=false,clubState=null;
-let gameSearch="",gameSearchTimer=null,gameResultFilter="all",gameColorFilter="all",gameSourceFilter="all";
+let gameSearch="",gameSearchTimer=null,gameResultFilter="all",gameColorFilter="all",gameSourceFilter="all",gameRenderLimit=100;
 let globalMoveAnnotations=loadGlobalMoveAnnotations();
-let appSettings={autoEngine:true,showArrows:true,compactMoves:false};
+let appSettings={autoEngine:true,showArrows:true,compactMoves:false,chesscomUser:DEFAULT_USER};
 try{appSettings={...appSettings,...JSON.parse(localStorage.getItem("ht_settings_v2")||"{}")}}catch{}
+appSettings.chesscomUser=String(appSettings.chesscomUser||DEFAULT_USER).trim()||DEFAULT_USER;
+function currentUser(){return appSettings.chesscomUser;}
 function saveAppSettings(){try{localStorage.setItem("ht_settings_v2",JSON.stringify(appSettings))}catch{}}
+function migrateBackupGames(games,schemaVersion){
+  let out=games.map(g=>({...g}));
+  const from=Math.max(1,Number(schemaVersion||1));
+  if(from<=1)out=out.map(g=>({...g,source:g.source||"PGN",analysisTree:g.analysisTree||null,annotationCount:Number(g.annotationCount||0)}));
+  if(from<=2)out=out.map(g=>({...g,updatedAt:Number(g.updatedAt||((Number(g.timestamp)||0)*1000)||Date.now())}));
+  return out;
+}
+
 
 const $=id=>document.getElementById(id);
 function toast(t){const x=$("toast");x.textContent=t;x.style.display="block";clearTimeout(window._toast);window._toast=setTimeout(()=>x.style.display="none",3200)}
@@ -45,16 +59,16 @@ function nav(id){
   if(id==="training")renderTraining();
 }
 document.querySelectorAll(".tab").forEach(b=>b.addEventListener("click",()=>nav(b.dataset.screen)));
-$("gameSearch")?.addEventListener("input",e=>{gameSearch=e.target.value;clearTimeout(gameSearchTimer);gameSearchTimer=setTimeout(renderGames,180)});
-$("gameResultFilter")?.addEventListener("change",e=>{gameResultFilter=e.target.value;renderGames()});
-$("gameColorFilter")?.addEventListener("change",e=>{gameColorFilter=e.target.value;renderGames()});
-$("gameSourceFilter")?.addEventListener("change",e=>{gameSourceFilter=e.target.value;renderGames()});
+$("gameSearch")?.addEventListener("input",e=>{gameSearch=e.target.value;gameRenderLimit=100;clearTimeout(gameSearchTimer);gameSearchTimer=setTimeout(renderGames,180)});
+$("gameResultFilter")?.addEventListener("change",e=>{gameResultFilter=e.target.value;gameRenderLimit=100;renderGames()});
+$("gameColorFilter")?.addEventListener("change",e=>{gameColorFilter=e.target.value;gameRenderLimit=100;renderGames()});
+$("gameSourceFilter")?.addEventListener("change",e=>{gameSourceFilter=e.target.value;gameRenderLimit=100;renderGames()});
 
 let pgnColor="w";
 function gamesForPgnColor(){return sorted().filter(g=>userSide(g)===pgnColor);}
 const recreatedPgnCache=new Map();
 function recreatedPgn(g){
-  const cacheKey=`${g.id}|${g.updatedAt||0}|${g.analysisTree?JSON.stringify(g.analysisTree).length:0}`;
+  const cacheKey=String(g.updatedAt||0);
   const cached=recreatedPgnCache.get(String(g.id));
   if(cached?.key===cacheKey)return cached.value;
   try{const parsed=parsePGN(g.pgn||"")[0];if(!parsed)return "";if(g.analysisTree){parsed.root=restoreTree(g.analysisTree);parsed.startFen=parsed.root.fen;}const value=exportPGN(parsed);recreatedPgnCache.set(String(g.id),{key:cacheKey,value});return value}catch{return ""}
@@ -90,7 +104,7 @@ function annotationKind(a){
   return "neutral";
 }
 function annotationDef(a){return ANNOTATION_DEFS.find(x=>x.icon===a)||{icon:a,label:"Annotation personnelle",kind:annotationKind(a),nag:null}}
-function mergeAnnotationCounts(target,annotations){for(const a of new Set(annotations||[]))target[a]=1}
+function mergeAnnotationCounts(target,annotations){for(const a of new Set(annotations||[]))target[a]=(target[a]||0)+1}
 function findMoveBySan(fen,san){try{const c=new Chess(fen);for(const m of c.legalMoves())if(c.san(m)===san)return m}catch{}return null}
 
 const CHESSCOM_BASE="https://api.chess.com/pub";
@@ -169,7 +183,7 @@ async function migrateChessComStableIds(){
   for(const id of deletes)await remove(id);
   return changed;
 }
-function userSide(g){if(!g)return null;const w=String(g.white||"").trim().toLowerCase()===USER.toLowerCase(),b=String(g.black||"").trim().toLowerCase()===USER.toLowerCase();return w&&!b?"w":b&&!w?"b":null}
+function userSide(g){if(!g)return null;const w=String(g.white||"").trim().toLowerCase()===currentUser().toLowerCase(),b=String(g.black||"").trim().toLowerCase()===currentUser().toLowerCase();return w&&!b?"w":b&&!w?"b":null}
 function resultForUser(g){
   const r=g.result||"*",side=userSide(g); if(!side||r==="*")return "unknown"; if(r==="1/2-1/2")return "draw"; return (side==="w"&&r==="1-0")||(side==="b"&&r==="0-1")?"win":"loss";
 }
@@ -201,6 +215,13 @@ function normalizeChessResult(game,h){
   return "*";
 }
 function mainlineSignature(root){const out=[];let n=root;while(n?.children?.[0]){n=n.children[0];out.push(n.san)}return out.join(" ")}
+function validateParsedGame(parsed){
+  if(!parsed?.root)throw new Error("Partie sans arbre de coups");
+  const c=new Chess(parsed.startFen||Chess.START_FEN);
+  if(!c.king("w")||!c.king("b"))throw new Error("FEN de départ invalide : roi manquant");
+  const st=c.status();
+  if(!Number.isInteger(st.legal)||st.legal<0)throw new Error("Position de départ incohérente");
+}
 function gameIdentity(source,parsed,headers){return hashId(`${source}|${headers.Link||headers.URL||""}|${headers.White||""}|${headers.Black||""}|${headers.Date||""}|${headers.UTCDate||""}|${headers.UTCTime||""}|${headers.Round||""}|${headers.Result||"*"}|${parsed.startFen||Chess.START_FEN}|${mainlineSignature(parsed.root)}`)}
 function metaFromHeaders(h,source,fallback,pgn,extra={}){return {id:hashId(`${source}|${pgn}`),source,timestamp:parseTimestamp(h,fallback),date:h.Date||"",time:h.UTCTime||"",white:h.White||"?",black:h.Black||"?",result:h.Result||"*",eco:openingName(h.ECO||""),time_control:h.TimeControl||"",event:h.Event||"",site:h.Site||"",round:h.Round||"",pgn,analysisTree:null,annotationCount:0,...extra}}
 function serializeTree(root){
@@ -214,7 +235,17 @@ function restoreTree(data,parent=null){
 function countAnnotations(n){let x=(n.annotations?.length||0)+(n.note?.trim()?1:0);for(const c of n.children||[])x+=countAnnotations(c);return x}
 function findNode(root,id){if(root.id===id)return root;for(const c of root.children||[]){const f=findNode(c,id);if(f)return f}return null}
 
-function openingPrefix(text,maxPlies=24){try{return openingLineUltraFast(text,maxPlies).out}catch{return []}}
+const openingPrefixCache=new Map();
+function openingPrefixForGame(g,maxPlies=24){
+  const id=String(g.id);
+  const key=String(g.pgn||"");
+  const cached=openingPrefixCache.get(id);
+  if(cached?.key===key&&cached.maxPlies===maxPlies)return cached.line;
+  let line=[];
+  try{line=openingLineUltraFast(key,maxPlies).out||[]}catch{}
+  openingPrefixCache.set(id,{key,maxPlies,line});
+  return line;
+}
 
 function positionKeyFromFen(fen){
   const p=String(fen||"").trim().split(/\s+/); if(p.length<4)return fen;
@@ -249,7 +280,7 @@ async function buildGlobalTree(){
       for(let j=i;j<end;j++){
         const g=games[j];
         let line=[];
-        try{line=openingPrefix(g.pgn,MAX_PLIES)}catch{}
+        line=openingPrefixForGame(g,MAX_PLIES)
         const startFen=line[0]?.from||Chess.START_FEN;
         let parent=getNode(positionKeyFromFen(startFen),startFen,g.id,0);
         parent.count++;
@@ -276,10 +307,15 @@ async function buildGlobalTree(){
               const anns=[...(analysisChild.annotations||[])];const counts={good:0,bad:0,neutral:0};anns.forEach(a=>counts[annotationKind(a)]++);
               gm={annotations:anns,kindCounts:counts};globalMoveAnnotations[moveKeyGlobal]=gm;
             }
-            if(gm&&!edge.annotationApplied){
-              if(gm.annotations)mergeAnnotationCounts(edge.annotations,gm.annotations);
-              if(gm.kindCounts){edge.good+=gm.kindCounts.good||0;edge.bad+=gm.kindCounts.bad||0;edge.neutral+=gm.kindCounts.neutral||0;}
-              edge.annotationApplied=true;
+            // Aggregate annotations from the current game's analysis tree.
+            // Each game reaches this block at most once per edge via seenEdges,
+            // so every distinct game contributes exactly once to the global count.
+            const gameAnnotations=analysisChild?.annotations||[];
+            if(gameAnnotations.length){
+              mergeAnnotationCounts(edge.annotations,gameAnnotations);
+              const counts={good:0,bad:0,neutral:0};
+              for(const a of new Set(gameAnnotations))counts[annotationKind(a)]++;
+              edge.good+=counts.good;edge.bad+=counts.bad;edge.neutral+=counts.neutral;
             }
             analysisNode=analysisChild||null;
           }
@@ -364,7 +400,7 @@ function renderStats(){
   const a=safeGames(),played=a.filter(g=>resultForUser(g)!=="unknown");
   const wins=played.filter(g=>resultForUser(g)==="win").length,draws=played.filter(g=>resultForUser(g)==="draw").length,losses=played.filter(g=>resultForUser(g)==="loss").length;
   $("sGames").textContent=a.length;$("sWins").textContent=wins;$("sDraws").textContent=draws;$("sLoss").textContent=losses;
-  const w=a.filter(g=>String(g.white).toLowerCase()===USER.toLowerCase()).length,b=a.filter(g=>String(g.black).toLowerCase()===USER.toLowerCase()).length;
+  const w=a.filter(g=>String(g.white).toLowerCase()===currentUser().toLowerCase()).length,b=a.filter(g=>String(g.black).toLowerCase()===currentUser().toLowerCase()).length;
   $("sColors").textContent=`Blancs ${w} · Noirs ${b} · Non terminées/inconnues ${a.length-played.length}`;
   const openings=new Map();for(const g of a){const key=g.eco||"Inconnue";openings.set(key,(openings.get(key)||0)+1)}
   const top=[...openings.entries()].sort((x,y)=>y[1]-x[1]).slice(0,5),box=$("sOpenings");
@@ -390,7 +426,16 @@ function renderGames(){
   const query=gameSearch.trim().toLowerCase();
   const a=sorted().filter(g=>{const hay=[g.white,g.black,g.eco,g.date,g.event,g.source,g.time_control].join(" ").toLowerCase();const result=gameResultFilter==="all"||resultForUser(g)===gameResultFilter;const color=gameColorFilter==="all"||userSide(g)===gameColorFilter;const source=gameSourceFilter==="all"||String(g.source||"").toLowerCase()===gameSourceFilter;return(!query||hay.includes(query))&&result&&color&&source});
   const el=$("gameList");if(!a.length){el.innerHTML='<div class="empty">Aucune partie ne correspond aux filtres.</div>';return}
-  el.innerHTML=a.map(g=>`<div class="game"><button class="gameOpen" data-id="${esc(g.id)}"><b>${esc(g.white||"?")}</b> — <b>${esc(g.black||"?")}</b><div class="meta">${esc(g.result||"*")} · ${esc(g.source||"PGN")} · ${esc(g.date||"")}${g.time_control?" · "+esc(g.time_control):""}${g.eco?" · "+esc(g.eco):""}</div></button><button class="deleteGame" data-id="${esc(g.id)}" title="Supprimer">×</button></div>`).join("");
+  const visible=a.slice(0,gameRenderLimit);
+  el.innerHTML=visible.map(g=>`<div class="game"><button class="gameOpen" data-id="${esc(g.id)}"><b>${esc(g.white||"?")}</b> — <b>${esc(g.black||"?")}</b><div class="meta">${esc(g.result||"*")} · ${esc(g.source||"PGN")} · ${esc(g.date||"")}${g.time_control?" · "+esc(g.time_control):""}${g.eco?" · "+esc(g.eco):""}</div></button><button class="deleteGame" data-id="${esc(g.id)}" title="Supprimer">×</button></div>`).join("");
+  if(visible.length<a.length){
+    const more=document.createElement("button");
+    more.className="loadMoreGames";
+    more.type="button";
+    more.textContent=`Afficher ${Math.min(100,a.length-visible.length).toLocaleString("fr-FR")} partie(s) de plus · ${visible.length.toLocaleString("fr-FR")} / ${a.length.toLocaleString("fr-FR")}`;
+    more.addEventListener("click",()=>{gameRenderLimit+=100;renderGames()});
+    el.appendChild(more);
+  }
   el.querySelectorAll(".gameOpen").forEach(b=>b.addEventListener("click",()=>openGame(b.dataset.id)));
   el.querySelectorAll(".deleteGame").forEach(b=>b.addEventListener("click",async e=>{e.stopPropagation();const g=allGames.find(x=>String(x.id)===String(b.dataset.id));if(!g)return;if(!confirm(`Supprimer ${g.white} — ${g.black} ?`))return;await remove(g.id);allGames=await getAll();invalidateGlobalTree();if(activeGame?.id===g.id){activeGame=null;currentNode=null;chess=new Chess()}renderGames();renderHome();renderStats();renderTraining();toast("Partie supprimée")}));
 }
@@ -436,11 +481,11 @@ function installBoardResizeObserver(){
 
 function formatEval(cp,mate){if(mate!==null&&mate!==undefined){const n=Number(mate);if(n===0)return "MATE";return `${n>0?"#":"-#"}${Math.abs(n)}`}const v=Number(cp||0)/100;if(Math.abs(v)<0.005)return "0.00";return `${v>0?"+":""}${v.toFixed(2)}`}
 function renderEvalBar(cp=0,mate=null,depth=null){const fill=$("evalFill"),label=$("evalValue"),bar=$("evalBar");if(!fill||!label||!bar)return;const pct=mate!==null?(mate>0?100:0):Math.max(0,Math.min(100,50+50*Math.tanh(Number(cp||0)/500)));fill.style.height=`${pct}%`;label.textContent=formatEval(cp,mate);bar.setAttribute("aria-label",`Évaluation Stockfish ${label.textContent}`);const progress=$("evalProgressFill");if(progress)progress.style.width=`${pct}%`;const depthEl=$("evalDepth");if(depthEl)depthEl.textContent=`Profondeur ${depth||"—"}`;const e=document.querySelector(".evalEngine");if(e)e.textContent=depth?`SF ${depth}`:"STOCKFISH";}
-function setEngineUnavailable(message="Stockfish indisponible"){$("evalValue")?.replaceChildren(document.createTextNode("—"));const e=document.querySelector(".evalEngine");if(e)e.textContent=message;const b=$("engineRetry");if(b)b.hidden=false;engineUnavailable=true;}
+function setEngineUnavailable(message="Stockfish indisponible"){$("evalValue")?.replaceChildren(document.createTextNode("—"));$("engineDiagnosticsText")?.replaceChildren(document.createTextNode(message));const e=document.querySelector(".evalEngine");if(e)e.textContent=message;const b=$("engineRetry");if(b)b.hidden=false;engineUnavailable=true;}
 function setEngineReady(){engineUnavailable=false;const b=$("engineRetry");if(b)b.hidden=true;}
 function uciToSan(fen,uci){try{if(!uci||uci.length<4)return uci||"—";const c=new Chess(fen);const move={from:uci.slice(0,2),to:uci.slice(2,4)};if(uci.length>4)move.promotion=uci[4];return c.san(move)}catch{return uci||"—"}}
 function handleEngineLine(line,token){
-  if(line.includes("HighTaxi engine load error")){setEngineUnavailable();return}
+  if(line.includes("HighTaxi engine load error")){setEngineUnavailable(line);return}
   if(token!==engineSearchToken||!line.startsWith("info ")||!line.includes(" score "))return;
   if(/\b(lowerbound|upperbound)\b/.test(line))return;
   const mcp=line.match(/ score cp (-?\d+)/),mm=line.match(/ score mate (-?\d+)/),md=line.match(/ depth (\d+)/),mpv=line.match(/\s+pv\s+([^\s]+)/);if(!mcp&&!mm)return;
@@ -454,33 +499,87 @@ function startEngineSearch(fen){
   if(!engineWorker||!engineReadyPromise)return;
   const token=engineSearchToken;
   enginePendingFen=null;engineLastFen=fen;engineBusy=true;setEngineReady();
-  try{engineWorker.postMessage({type:"token",token});engineWorker.postMessage(`position fen ${fen}`);engineWorker.postMessage("go depth 16")}catch(e){engineBusy=false;setEngineUnavailable(e.message)}
+  try{engineWorker.postMessage(`position fen ${fen}`);engineWorker.postMessage("go depth 16")}catch(e){engineBusy=false;setEngineUnavailable(e.message)}
 }
 function ensureEngine(){
   if(engineReadyPromise)return engineReadyPromise;
   engineReadyPromise=new Promise((resolve,reject)=>{
     const workerCandidates=[
-      {js:new URL("./stockfish/stockfish-19-lite-single.js",import.meta.url).href,wasm:new URL("./stockfish/stockfish-19-lite-single.wasm",import.meta.url).href,label:"local"},
-      {js:"https://cdn.jsdelivr.net/npm/stockfish@19.0.0/bin/stockfish-19-lite-single.js",wasm:"https://cdn.jsdelivr.net/npm/stockfish@19.0.0/bin/stockfish-19-lite-single.wasm",label:"jsDelivr"},
-      {js:"https://github.com/nmrugg/stockfish.js/releases/download/v19.0.0/stockfish-19-lite-single.js",wasm:"https://github.com/nmrugg/stockfish.js/releases/download/v19.0.0/stockfish-19-lite-single.wasm",label:"GitHub release"}
+      {
+        js:new URL("./stockfish/stockfish-18-lite-single.js",import.meta.url).href,
+        wasm:new URL("./stockfish/stockfish-18-lite-single.wasm",import.meta.url).href,
+        label:"local Stockfish 18"
+      },
+      {
+        js:"https://cdn.jsdelivr.net/npm/stockfish@18.0.8/bin/stockfish-18-lite-single.js",
+        wasm:"https://cdn.jsdelivr.net/npm/stockfish@18.0.8/bin/stockfish-18-lite-single.wasm",
+        label:"jsDelivr Stockfish 18"
+      },
+      {
+        js:"https://github.com/nmrugg/stockfish.js/releases/download/v18.0.8/stockfish-18-lite-single.js",
+        wasm:"https://github.com/nmrugg/stockfish.js/releases/download/v18.0.8/stockfish-18-lite-single.wasm",
+        label:"GitHub Stockfish 18"
+      }
     ];
     let candidateIndex=0;
-    const makeWorker=()=>{const c=workerCandidates[candidateIndex];const base=new URL("./stockfish-worker.js",import.meta.url);base.search=`?engine=${encodeURIComponent(c.js)}&wasm=${encodeURIComponent(c.wasm)}`;return new Worker(base);};
+    const makeWorker=()=>{
+      const c=workerCandidates[candidateIndex];
+      const base=new URL("./stockfish-worker.js",import.meta.url);
+      base.search=`?engine=${encodeURIComponent(c.js)}&label=${encodeURIComponent(c.label)}`;
+      // stockfish.js worker mode reads its WASM URL from the Worker URL hash.
+      base.hash=`${encodeURIComponent(c.wasm)},worker`;
+      return new Worker(base);
+    };
     const w=makeWorker();engineWorker=w;let ready=false,done=false;
-    const fail=(err)=>{if(done)return;done=true;engineBusy=false;try{w.terminate()}catch{};engineWorker=null;engineReadyPromise=null;setEngineUnavailable();reject(err)};
+    const fail=(err)=>{
+      if(done)return;
+      done=true;engineBusy=false;
+      try{w.terminate()}catch{}
+      engineWorker=null;engineReadyPromise=null;setEngineUnavailable(err?.message||"Stockfish indisponible");
+      reject(err);
+    };
     const timer=setTimeout(()=>fail(new Error("Stockfish ne répond pas")),20000);
     w.onmessage=e=>{
-      const msg=e.data;const line=typeof msg==="string"?msg:msg?.line||"";const token=typeof msg==="string"?engineSearchToken:Number(msg?.token);
-      if(line.includes("uciok")){w.postMessage("setoption name MultiPV value 1");w.postMessage("isready")}
-      if(line.includes("readyok")&&!ready){ready=true;done=true;clearTimeout(timer);setEngineReady();resolve(w);if(enginePendingFen&&!engineBusy)startEngineSearch(enginePendingFen)}
-      if(line.startsWith("bestmove")){engineBusy=false;const next=enginePendingFen;enginePendingFen=null;if(next)startEngineSearch(next)}
+      const msg=e.data;
+      const line=typeof msg==="string"?msg:msg?.line||"";
+      const token=typeof msg==="string"?engineSearchToken:Number(msg?.token);
+      if(line.includes("HighTaxi engine load error")){fail(new Error(line));return}
+      if($("engineDiagnosticsText")&&line)$("engineDiagnosticsText").textContent=line;
+      if(line.includes("uciok")){
+        w.postMessage("setoption name MultiPV value 1");
+        w.postMessage("isready");
+      }
+      if(line.includes("readyok")&&!ready){
+        ready=true;done=true;clearTimeout(timer);setEngineReady();resolve(w);
+        if(enginePendingFen&&!engineBusy)startEngineSearch(enginePendingFen);
+      }
+      if(line.startsWith("bestmove")){
+        engineBusy=false;
+        const next=enginePendingFen;enginePendingFen=null;
+        if(next)startEngineSearch(next);
+      }
       handleEngineLine(line,token);
     };
-    w.onerror=()=>{if(candidateIndex<workerCandidates.length-1){candidateIndex++;try{w.terminate()}catch{};engineWorker=null;engineReadyPromise=null;setTimeout(()=>{ensureEngine().then(()=>{if(enginePendingFen&&!engineBusy)startEngineSearch(enginePendingFen)}).catch(()=>{})},0);return}fail(new Error("Moteur indisponible"));};
+    w.onerror=()=>{
+      if(done)return;
+      if(candidateIndex<workerCandidates.length-1){
+        candidateIndex++;
+        try{w.terminate()}catch{}
+        engineWorker=null;engineReadyPromise=null;
+        setTimeout(()=>{
+          ensureEngine().then(()=>{
+            if(enginePendingFen&&!engineBusy)startEngineSearch(enginePendingFen);
+          }).catch(()=>{});
+        },0);
+        return;
+      }
+      fail(new Error("Moteur indisponible"));
+    };
     try{w.postMessage("uci")}catch(e){fail(e)}
-  }).catch(e=>{setEngineUnavailable();throw e});
+  }).catch(e=>{setEngineUnavailable(e.message);throw e});
   return engineReadyPromise;
 }
+
 function scheduleEngineAnalysis(fen){
   if(!fen||!appSettings.autoEngine)return;
   if(engineUnavailable)return;
@@ -587,9 +686,9 @@ function saveNoteBeforeNavigation(){clearTimeout(noteSaveTimer);saveNoteDraft();
 
 function renderAnnotations(){
   const row=$("annotationRow");if(!row)return;row.innerHTML="";const set=new Set(currentNode?.annotations||[]);
-  ANNOTATION_DEFS.forEach(def=>{const b=document.createElement("button");b.type="button";b.className=`anno ${def.kind} ${set.has(def.icon)?"active":""}`;b.dataset.annotation=def.icon;b.dataset.label=def.label;b.textContent=def.icon;b.title=`${def.icon} · ${def.label}`;b.setAttribute("aria-label",def.label);b.addEventListener("click",()=>{
+  ANNOTATION_DEFS.forEach(def=>{const b=document.createElement("button");b.type="button";b.className=`anno ${def.kind} ${set.has(def.icon)?"active":""}`;b.dataset.annotation=def.icon;b.dataset.label=def.label;b.textContent=def.icon;b.title=`${def.icon} · ${def.label}`;b.setAttribute("aria-label",def.label);b.setAttribute("aria-pressed",set.has(def.icon)?"true":"false");b.addEventListener("click",()=>{
     currentNode.annotations=currentNode.annotations||[];
-    currentNode.annotations=currentNode.annotations.includes(def.icon)?currentNode.annotations.filter(x=>x!==def.icon):[...currentNode.annotations,def.icon];
+    currentNode.annotations=currentNode.annotations.includes(def.icon)?currentNode.annotations.filter(x=>x!==def.icon):[...currentNode.annotations,def.icon];b.setAttribute("aria-pressed",currentNode.annotations.includes(def.icon)?"true":"false");
     if(currentNode.parent&&currentNode.san){const key=globalMoveKey(currentNode.parent.fen,currentNode.move);const next=[...currentNode.annotations];const counts={good:0,bad:0,neutral:0};next.forEach(x=>counts[annotationKind(x)]++);globalMoveAnnotations[key]={annotations:next,kindCounts:counts};saveGlobalMoveAnnotations();}
     renderAnnotations();renderBoard();schedulePersistAnalysis();
   });row.appendChild(b)});
@@ -630,6 +729,7 @@ $("pgnFile").addEventListener("change",async e=>{
       const parsedGames=parsePGN(source);
       if(parsedGames.errors?.length){invalid.push(parsedGames.errors[0]);continue}
       const parsed=parsedGames[0]; if(!parsed)continue;
+      try{validateParsedGame(parsed)}catch(err){invalid.push({error:err.message});continue}
       const h=headersFrom(source),g={...metaFromHeaders(h,"PGN",Date.now()/1000,source),id:gameIdentity("PGN",parsed,h)};
       if(existing.has(g.id))continue; existing.add(g.id); added.push(g);
     }
@@ -648,11 +748,12 @@ $("analysisExportBtn")?.addEventListener("click",exportActiveGamePgn);
 
 $("backupBtn").addEventListener("click",async()=>{try{const games=await getAll();const data=JSON.stringify({format:"HighTaxi Chess Backup",version:APP_VERSION,schemaVersion:DATA_SCHEMA_VERSION,exportedAt:new Date().toISOString(),gameCount:games.length,globalMoveAnnotations,chessSyncArchives:JSON.parse(localStorage.getItem(CHESS_SYNC_KEY)||"[]"),games});const blob=new Blob([data],{type:"application/json"}),url=URL.createObjectURL(blob),a=document.createElement("a");a.href=url;a.download=`HighTaxiChess-backup-${new Date().toISOString().slice(0,10)}.json`;a.click();setTimeout(()=>URL.revokeObjectURL(url),500);toast(`${games.length} partie(s) sauvegardée(s)`)}catch(e){toast("Sauvegarde impossible : "+e.message)}});
 $("restoreBtn").addEventListener("click",()=>$("backupFile").click());
-$("backupFile").addEventListener("change",async e=>{const f=e.target.files?.[0];if(!f)return;try{const data=JSON.parse(await f.text());if(data.format!=="HighTaxi Chess Backup"||!Array.isArray(data.games))throw new Error("Format de sauvegarde invalide");if(data.schemaVersion&&Number(data.schemaVersion)>DATA_SCHEMA_VERSION)throw new Error("Sauvegarde créée par une version plus récente");const games=data.games.filter(g=>g&&g.id&&typeof g.pgn==="string");if(games.length!==data.games.length)throw new Error("Certaines parties sont invalides");const importedGlobalAnnotations=data.globalMoveAnnotations&&typeof data.globalMoveAnnotations==="object"?data.globalMoveAnnotations:null;const importedSyncArchives=Array.isArray(data.chessSyncArchives)?data.chessSyncArchives:null;const mode=confirm(`Restaurer ${games.length} partie(s).\n\nOK = remplacer la base actuelle\nAnnuler = fusionner avec la base actuelle`)?"replace":"merge";if(mode==="replace"){if(!confirm("Dernière confirmation : toutes les parties actuellement présentes seront supprimées."))throw new Error("Restauration annulée");await replaceAll(games);if(importedGlobalAnnotations){globalMoveAnnotations=importedGlobalAnnotations;saveGlobalMoveAnnotations()}if(importedSyncArchives)localStorage.setItem(CHESS_SYNC_KEY,JSON.stringify(importedSyncArchives))}else{const existing=await getAll();const byId=new Map(existing.map(g=>[String(g.id),g]));for(const g of games){const old=byId.get(String(g.id));if(!old||(Number(g.updatedAt||0)>=Number(old.updatedAt||0)))byId.set(String(g.id),g)}await putMany([...byId.values()]);if(importedGlobalAnnotations){globalMoveAnnotations={...globalMoveAnnotations,...importedGlobalAnnotations};saveGlobalMoveAnnotations()}if(importedSyncArchives)localStorage.setItem(CHESS_SYNC_KEY,JSON.stringify(importedSyncArchives))}allGames=await getAll();invalidateGlobalTree();renderGames();renderPgnCollections();renderHome();renderStats();renderTraining();toast(`${games.length} partie(s) restaurée(s) · ${mode==="replace"?"base remplacée":"base fusionnée"}`)}catch(err){toast("Restauration impossible : "+err.message)}finally{e.target.value=""}});
+$("backupFile").addEventListener("change",async e=>{const f=e.target.files?.[0];if(!f)return;try{const data=JSON.parse(await f.text());if(data.format!=="HighTaxi Chess Backup"||!Array.isArray(data.games))throw new Error("Format de sauvegarde invalide");if(data.schemaVersion&&Number(data.schemaVersion)>DATA_SCHEMA_VERSION)throw new Error("Sauvegarde créée par une version plus récente");const rawGames=data.games.filter(g=>g&&g.id&&typeof g.pgn==="string");if(rawGames.length!==data.games.length)throw new Error("Certaines parties sont invalides");const games=migrateBackupGames(rawGames,Number(data.schemaVersion||1));const importedGlobalAnnotations=data.globalMoveAnnotations&&typeof data.globalMoveAnnotations==="object"?data.globalMoveAnnotations:null;const importedSyncArchives=Array.isArray(data.chessSyncArchives)?data.chessSyncArchives:null;const mode=confirm(`Restaurer ${games.length} partie(s).\n\nOK = remplacer la base actuelle\nAnnuler = fusionner avec la base actuelle`)?"replace":"merge";if(mode==="replace"){if(!confirm("Dernière confirmation : toutes les parties actuellement présentes seront supprimées."))throw new Error("Restauration annulée");await replaceAll(games);if(importedGlobalAnnotations){globalMoveAnnotations=importedGlobalAnnotations;saveGlobalMoveAnnotations()}if(importedSyncArchives)localStorage.setItem(CHESS_SYNC_KEY,JSON.stringify(importedSyncArchives))}else{const existing=await getAll();const byId=new Map(existing.map(g=>[String(g.id),g]));for(const g of games){const old=byId.get(String(g.id));if(!old||(Number(g.updatedAt||0)>=Number(old.updatedAt||0)))byId.set(String(g.id),g)}await putMany([...byId.values()]);if(importedGlobalAnnotations){globalMoveAnnotations={...globalMoveAnnotations,...importedGlobalAnnotations};saveGlobalMoveAnnotations()}if(importedSyncArchives)localStorage.setItem(CHESS_SYNC_KEY,JSON.stringify(importedSyncArchives))}allGames=await getAll();invalidateGlobalTree();renderGames();renderPgnCollections();renderHome();renderStats();renderTraining();toast(`${games.length} partie(s) restaurée(s) · ${mode==="replace"?"base remplacée":"base fusionnée"}`)}catch(err){toast("Restauration impossible : "+err.message)}finally{e.target.value=""}});
 
 $("syncBtn").addEventListener("click",async()=>{
   const b=$("syncBtn"),progress=$("syncProgress"),wrap=$("syncProgressWrap"),label=$("syncProgressText");
   b.disabled=true;
+  saveSyncStatus({at:Date.now(),ok:false,message:"Synchronisation en cours…"});renderSyncStatus();
   const setProgress=(done,total,text)=>{
     if(wrap)wrap.style.display="block";
     if(progress){progress.max=Math.max(total,1);progress.value=done;}
@@ -660,9 +761,9 @@ $("syncBtn").addEventListener("click",async()=>{
     b.textContent=total?`Synchronisation ${done}/${total}…`:"Synchronisation…";
   };
   try{
-    const data=await fetchChessComJson(`${CHESSCOM_BASE}/player/${encodeURIComponent(USER)}/games/archives`);
+    const data=await fetchChessComJson(`${CHESSCOM_BASE}/player/${encodeURIComponent(currentUser())}/games/archives`);
     const archives=Array.isArray(data?.archives)?data.archives.filter(Boolean):[];
-    if(!archives.length)throw new Error(`Aucune archive trouvée pour ${USER}.`);
+    if(!archives.length)throw new Error(`Aucune archive trouvée pour ${currentUser()}.`);
     const ordered=[...archives].reverse();
     const synced=new Set(JSON.parse(localStorage.getItem(CHESS_SYNC_KEY)||"[]"));
     const now=new Date();
@@ -695,6 +796,7 @@ $("syncBtn").addEventListener("click",async()=>{
           const result=parsePGN(raw);
           if(!result.length||result.errors?.length)throw new Error(result.errors?.[0]?.error||"PGN invalide");
           parsed=result[0];
+          validateParsedGame(parsed);
         }catch{invalid++;continue}
         fetched++;
         const pgn=String(raw).trim();
@@ -714,10 +816,10 @@ $("syncBtn").addEventListener("click",async()=>{
     if(errors)details.push(`${errors} archive(s) en erreur`);
     if(invalid)details.push(`${invalid} PGN invalide(s)`);
     toast(details.join(" · "));
-    if(label)label.textContent=`Terminé · ${added} ajoutée(s) · ${errors||invalid?"avec avertissements":"sans erreur"}`;
+    if(label)label.textContent=`Terminé · ${added} ajoutée(s) · ${errors||invalid?"avec avertissements":"sans erreur"}`;saveSyncStatus({at:Date.now(),ok:!(errors||invalid),message:`${added} ajoutée(s)${errors||invalid?` · ${errors} erreur(s), ${invalid} PGN invalide(s)`:""}`});renderSyncStatus();
   }catch(e){
     toast("Erreur de synchronisation : "+e.message);
-    if(label)label.textContent="Synchronisation interrompue";
+    if(label)label.textContent="Synchronisation interrompue";saveSyncStatus({at:Date.now(),ok:false,message:e.message||"Erreur inconnue"});renderSyncStatus();
   }finally{
     b.disabled=false;b.textContent="Synchroniser Chess.com";
   }
@@ -726,14 +828,15 @@ $("syncBtn").addEventListener("click",async()=>{
 $("settingsBtn").addEventListener("click",async()=>{const panel=$("settingsPanel");if(panel){panel.classList.add("open");panel.setAttribute("aria-hidden","false");}await renderSettings();});
 $("settingsClose")?.addEventListener("click",()=>{const p=$("settingsPanel");p?.classList.remove("open");p?.setAttribute("aria-hidden","true")});
 $("settingsPanel")?.addEventListener("click",e=>{if(e.target.id==="settingsPanel")$("settingsClose")?.click()});
-async function renderSettings(){const est=await estimateStorage();$("settingsAccount")?.replaceChildren(document.createTextNode(USER));$("settingsVersion")?.replaceChildren(document.createTextNode(APP_VERSION));$("settingsStorage")?.replaceChildren(document.createTextNode(est?.usage?`${(est.usage/1024/1024).toFixed(1)} Mo utilisés`:"Indisponible"));["autoEngine","showArrows","compactMoves"].forEach(k=>{const el=$("setting_"+k);if(el)el.checked=!!appSettings[k]});}
+async function renderSettings(){const est=await estimateStorage();const account=$("settingsAccount");if(account)account.value=currentUser();$("settingsVersion")?.replaceChildren(document.createTextNode(APP_VERSION));$("settingsStorage")?.replaceChildren(document.createTextNode(est?.usage?`${(est.usage/1024/1024).toFixed(1)} Mo utilisés`:"Indisponible"));["autoEngine","showArrows","compactMoves"].forEach(k=>{const el=$("setting_"+k);if(el)el.checked=!!appSettings[k]});}
+$("settingsAccount")?.addEventListener("change",e=>{const value=String(e.target.value||"").trim();if(!value){e.target.value=currentUser();return}appSettings.chesscomUser=value;saveAppSettings();renderHome();toast(`Compte Chess.com : ${value}`)});
 ["autoEngine","showArrows","compactMoves"].forEach(k=>$("setting_"+k)?.addEventListener("change",e=>{appSettings[k]=e.target.checked;saveAppSettings();if(k==="showArrows")renderBoard();if(k==="compactMoves")document.body.classList.toggle("compactMoves",!!appSettings.compactMoves);if(k==="autoEngine"&&appSettings.autoEngine)onPositionChanged()}));
 $("settingsRebuild")?.addEventListener("click",()=>{invalidateGlobalTree();if(document.body.classList.contains("analysisActive"))buildGlobalTree();toast("Arbre global en reconstruction")});
 $("settingsEngineReset")?.addEventListener("click",()=>{try{engineWorker?.terminate()}catch{}engineWorker=null;engineReadyPromise=null;engineUnavailable=false;engineSearchToken++;if(appSettings.autoEngine)onPositionChanged();toast("Stockfish réinitialisé")});
-$("settingsClearCaches")?.addEventListener("click",()=>{recreatedPgnCache.clear();trainingCache=[];trainingCacheRevision=-1;invalidateGlobalTree();toast("Caches locaux vidés")});
+$("settingsClearCaches")?.addEventListener("click",()=>{recreatedPgnCache.clear();openingPrefixCache.clear();trainingCache=[];trainingCacheRevision=-1;invalidateGlobalTree();toast("Caches locaux vidés")});
 
 async function boot(){
-  try{await migrateLegacy();await migrateChessComStableIds();requestPersistence().catch(()=>{});allGames=await getAll();renderHome();renderGames();renderStats();renderTraining();installBoardResizeObserver();document.body.classList.toggle("compactMoves",!!appSettings.compactMoves);renderBoard();
+  try{await migrateLegacy();await migrateChessComStableIds();requestPersistence().catch(()=>{});allGames=await getAll();renderHome();renderGames();renderStats();renderTraining();renderSyncStatus();installBoardResizeObserver();document.body.classList.toggle("compactMoves",!!appSettings.compactMoves);renderBoard();
     const hash=location.hash;if(hash==="#board"||hash==="#games")nav(hash.slice(1)==="board"?"boardScreen":"games");else nav("boardScreen");
   }catch(e){toast("Erreur de stockage : "+e.message);renderBoard()}
 }
@@ -741,7 +844,7 @@ if("serviceWorker" in navigator)navigator.serviceWorker.register("./sw.js").catc
 boot();
 
 function clubHeaders(){
-  return {Event:"Club",Site:"HighTaxi Chess",Date:new Date().toISOString().slice(0,10).replace(/-/g,"."),White:$("manualWhite").value.trim()||USER,Black:$("manualBlack").value.trim()||"Adversaire",Result:$("manualResult").value};
+  return {Event:"Club",Site:"HighTaxi Chess",Date:new Date().toISOString().slice(0,10).replace(/-/g,"."),White:$("manualWhite").value.trim()||currentUser(),Black:$("manualBlack").value.trim()||"Adversaire",Result:$("manualResult").value};
 }
 function clubPGN(){
   if(!clubState)return "";

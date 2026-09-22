@@ -1,25 +1,29 @@
-/* HighTaxi Chess — Stockfish bootstrap for a same-origin Worker.
- * The worker itself is hosted by GitHub Pages. It imports a remote or local
- * Stockfish build so Safari does not reject a cross-origin Worker URL.
- * Emscripten's locateFile hook is supplied before importScripts so the WASM
- * binary is resolved explicitly instead of relying on the wrapper URL.
+/* HighTaxi Chess — local-first Stockfish 18 bootstrap.
+ * Stockfish.js worker mode receives the WASM URL through the Worker URL hash:
+ *   <wasm-url>,worker
+ * The engine JS itself is loaded with importScripts so it stays inside this
+ * same Worker and never blocks the main UI thread.
  */
 const params = new URLSearchParams(self.location.search);
 const engine = params.get("engine") || "";
-const wasm = params.get("wasm") || "";
+const label = params.get("label") || "Stockfish";
 if (!engine) throw new Error("Stockfish engine URL missing");
 
-self.Module = {
-  ...(self.Module || {}),
-  locateFile(path) {
-    if (wasm && /\.wasm(?:$|\?)/i.test(path)) return wasm;
-    return path;
-  }
-};
+self.addEventListener("error", event => {
+  try {
+    self.postMessage({
+      __highTaxi:true,
+      line:`info string HighTaxi worker error [${label}] ${event?.message || "Worker error"}`
+    });
+  } catch {}
+});
 
 try {
   importScripts(engine);
 } catch (error) {
-  self.postMessage({__highTaxi:true,line:`info string HighTaxi engine load error ${error?.message||error}`});
+  self.postMessage({
+    __highTaxi:true,
+    line:`info string HighTaxi engine load error [${label}] ${error?.message||error}`
+  });
   throw error;
 }

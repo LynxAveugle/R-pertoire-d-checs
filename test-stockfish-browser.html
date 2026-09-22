@@ -1,0 +1,15 @@
+<!doctype html><meta charset="utf-8"><title>HighTaxi Stockfish browser integration</title><body>BOOT</body>
+<script>
+(async()=>{
+  const wasm=new URL('./stockfish/stockfish-18-lite-single.wasm',location.href).href;
+  const js=new URL('./stockfish/stockfish-18-lite-single.js',location.href).href;
+  const worker=new Worker(js+'#'+encodeURIComponent(wasm)+',worker');
+  const lines=[]; let bestmove=false;
+  worker.onmessage=e=>{const line=String(e.data);lines.push(line);if(line==='uciok'||line==='readyok'){} if(/^bestmove\s+\S+/.test(line)){bestmove=true;document.body.textContent='PASS\n'+lines.join('\n');worker.terminate();}};
+  worker.onerror=e=>{document.body.textContent='ERROR\n'+(e.message||'Worker error');worker.terminate();};
+  worker.postMessage('uci');
+  worker.postMessage('isready');
+  setTimeout(()=>{worker.postMessage('position startpos');worker.postMessage('go depth 1');},500);
+  setTimeout(()=>{if(!bestmove){document.body.textContent='TIMEOUT\n'+lines.join('\n');worker.terminate();}},10000);
+})();
+</script>
